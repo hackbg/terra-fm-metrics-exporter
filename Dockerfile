@@ -12,6 +12,6 @@ RUN go build -mod=readonly -tags "muslc make build" -o bin/terra-chainlink-expor
 FROM scratch
 COPY --from=go-builder /bin/terra-chainlink-exporter /bin/terra-chainlink-exporter
 
-EXPOSE 8080
+EXPOSE 8089
 
 ENTRYPOINT ["/bin/terra-chainlink-exporter"]
