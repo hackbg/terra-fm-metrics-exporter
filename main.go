@@ -22,6 +22,8 @@ const FluxAggregator = "terra1tndcaqxkpc5ce9qee5ggqf430mr2z3pefe5wj6"
 
 var (
 	ChainId       string
+	FeedId        string
+	ContractType  = "flux_monitor"
 	ConstLabels   map[string]string
 	rpcAddr       = os.Getenv("TERRA_RPC")
 	TendermintRpc = os.Getenv("TENDERMINT_RPC")
@@ -29,13 +31,28 @@ var (
 
 var log = zerolog.New(zerolog.ConsoleWriter{Out: os.Stdout}).With().Timestamp().Logger()
 
-type LatestRoundResponse struct {
-	RoundId         int    `json:"round_id"`
-	Answer          string `json:"answer"`
-	StartedAt       int    `json:"started_at"`
-	UpdatedAt       int    `json:"updated_at"`
-	AnsweredInRound int    `json:"answered_in_round"`
-}
+type (
+	AggregatorConfigResponse struct {
+		Link               string `json:"link,omitempty"`
+		Validator          string `json:"validator,omitempty"`
+		PaymentAmount      string `json:"payment_amount,omitempty"`
+		MaxSubmissionCount int    `json:"max_submission_count,omitempty"`
+		MinSubmissionCount int    `json:"min_submission_count,omitempty"`
+		RestartDelay       int    `json:"restart_delay,omitempty"`
+		Timeout            int    `json:"timeout,omitempty"`
+		Decimals           int    `json:"decimal,omitempty"`
+		Description        string `json:"description,omitempty"`
+		MinSubmissionValue string `json:"min_submission_value,omitempty"`
+		MaxSubmissionValue string `json:"max_submission_value,omitempty"`
+	}
+	LatestRoundResponse struct {
+		RoundId         int    `json:"round_id"`
+		Answer          string `json:"answer"`
+		StartedAt       int    `json:"started_at"`
+		UpdatedAt       int    `json:"updated_at"`
+		AnsweredInRound int    `json:"answered_in_round"`
+	}
+)
 
 func StringToInt(s string) int {
 	i, err := strconv.Atoi(s)
@@ -59,8 +76,53 @@ func setChainId() {
 	log.Info().Str("network", status.NodeInfo.Network).Msg("Got network status from Tendermint")
 	ChainId = status.NodeInfo.Network
 	ConstLabels = map[string]string{
-		"chain_id": ChainId,
+		"chain_id":      ChainId,
+		"contract_type": ContractType,
 	}
+}
+
+func getLatestBlockHeight() int64 {
+	client, err := tmrpc.New(TendermintRpc, "/websocket")
+	if err != nil {
+		log.Fatal().Err(err).Msg("Could not create Tendermint client")
+	}
+
+	status, err := client.Status(context.Background())
+	if err != nil {
+		log.Fatal().Err(err).Msg("Could not query Tendermint status")
+	}
+
+	log.Info().Str("network", status.NodeInfo.Network).Msg("Got network status from Tendermint")
+
+	latestHeight := status.SyncInfo.LatestBlockHeight
+	return latestHeight
+}
+
+func setFeedId(grpcConn *grpc.ClientConn) {
+	sublogger := log.With().Str("request-id", uuid.New().String()).Logger()
+	wasmClient := wasmTypes.NewQueryClient(grpcConn)
+	response, err := wasmClient.ContractStore(
+		context.Background(),
+		&wasmTypes.QueryContractStoreRequest{
+			ContractAddress: FluxAggregator,
+			QueryMsg:        []byte(`{"get_aggregator_config": {}}`),
+		},
+	)
+	if err != nil {
+		sublogger.Error().Err(err).Msg("Could not query the contract")
+		return
+	}
+
+	var res AggregatorConfigResponse
+	err = json.Unmarshal(response.QueryResult, &res)
+
+	if err != nil {
+		sublogger.Error().Err(err).Msg("Could not parse response")
+		return
+	}
+
+	FeedId = res.Description
+	ConstLabels["feedId"] = FeedId
 }
 
 func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, grpcConn *grpc.ClientConn) {
@@ -92,12 +154,34 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, grpcConn *grp
 		[]string{"contract_address"},
 	)
 
+	fmCurrentHeadGauge := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "head_tracker_current_head",
+			Help: "Tracks the current block height that the monitoring instance has processed",
+		},
+		[]string{"network_name", "chain_id", "network_id"},
+	)
+
 	registry := prometheus.NewRegistry()
 	registry.MustRegister(fmLatestRoundResponseGauge)
 	registry.MustRegister(nodeMetadataGauge)
 	registry.MustRegister(fmAnswersTotal)
+	registry.MustRegister(fmCurrentHeadGauge)
 
 	var wg sync.WaitGroup
+
+	go func() {
+		defer wg.Done()
+		sublogger.Debug().Msg("Querying the node information")
+		height := getLatestBlockHeight()
+		fmCurrentHeadGauge.With(prometheus.Labels{
+			"chain_id": ChainId,
+			// TODO
+			"network_name": "",
+			"network_id":   "",
+		}).Set(float64(height))
+	}()
+	wg.Add(1)
 
 	go func() {
 		defer wg.Done()
@@ -133,7 +217,7 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, grpcConn *grp
 			"contract_address": FluxAggregator,
 		}).Add(float64(res.RoundId))
 
-		nodeMetadataGauge.Set(0)
+		nodeMetadataGauge.Set(1)
 	}()
 	wg.Add(1)
 	wg.Wait()
@@ -155,6 +239,7 @@ func main() {
 	defer grpcConn.Close()
 
 	setChainId()
+	setFeedId(grpcConn)
 
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		TerraChainlinkHandler(w, r, grpcConn)
