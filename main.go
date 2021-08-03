@@ -18,15 +18,11 @@ import (
 	"google.golang.org/grpc"
 )
 
-// const FluxAggregator = "terra1tndcaqxkpc5ce9qee5ggqf430mr2z3pefe5wj6"
-// const FluxAggregator1 = "terra1z449mpul3pwkdd3892gv28ewv5l06w7895wewm"
-
 var aggregators = []string{"terra1tndcaqxkpc5ce9qee5ggqf430mr2z3pefe5wj6", "terra1z449mpul3pwkdd3892gv28ewv5l06w7895wewm"}
 
 var (
-	ChainId      string
-	ContractType = "flux_monitor"
-	// TODO what should the const labels be?
+	ChainId       string
+	ContractType  = "flux_monitor"
 	ConstLabels   map[string]string
 	rpcAddr       = os.Getenv("TERRA_RPC")
 	TendermintRpc = os.Getenv("TENDERMINT_RPC")
@@ -319,7 +315,7 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, grpcConn *grp
 				"network_id":      "",
 				"network_name":    "",
 				"symbol":          "",
-			})
+			}).Set(1)
 		}
 	}()
 	wg.Add(1)
