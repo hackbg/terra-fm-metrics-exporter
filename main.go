@@ -10,20 +10,24 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/hackbg/terra-chainlink-exporter/subscriber"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
+	tmrTypes "github.com/tendermint/tendermint/abci/types"
 	tmrpc "github.com/tendermint/tendermint/rpc/client/http"
 	wasmTypes "github.com/terra-money/core/x/wasm/types"
+	"github.com/tidwall/gjson"
 	"google.golang.org/grpc"
 )
 
-var aggregators = []string{"terra1tndcaqxkpc5ce9qee5ggqf430mr2z3pefe5wj6", "terra1z449mpul3pwkdd3892gv28ewv5l06w7895wewm"}
+var aggregators = []string{"terra1tndcaqxkpc5ce9qee5ggqf430mr2z3pefe5wj6"}
 
 var (
 	ChainId       string
 	ContractType  = "flux_monitor"
 	ConstLabels   map[string]string
+	WsUrl         = os.Getenv("WS_URL")
 	rpcAddr       = os.Getenv("TERRA_RPC")
 	TendermintRpc = os.Getenv("TENDERMINT_RPC")
 )
@@ -119,23 +123,6 @@ func getAggregatorConfig(wasmClient wasmTypes.QueryClient, aggregatorAddress str
 	)
 
 	return response, err
-}
-
-func rawQuery(grpcConn *grpc.ClientConn) {
-	sublogger := log.With().Str("request-id", uuid.New().String()).Logger()
-	sublogger.Debug().Msg("querying RAW CONTRACT")
-	wasmClient := wasmTypes.NewQueryClient(grpcConn)
-	response, err := wasmClient.RawStore(context.Background(), &wasmTypes.QueryRawStoreRequest{
-		ContractAddress: aggregators[0],
-		Key:             []byte("aggregator_config"),
-	})
-
-	if err != nil {
-		sublogger.Error().Err(err).Msg("Could not query the contract")
-	}
-
-	fmt.Println(response.Data)
-	sublogger.Debug().Msg(string(response.Data))
 }
 
 func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, grpcConn *grpc.ClientConn) {
@@ -307,14 +294,13 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, grpcConn *grp
 			feedContractMetadataGauge.With(prometheus.Labels{
 				"chain_id":         ChainId,
 				"contract_address": aggregators[aggregator],
-				// TODO, should not be static
-				"contract_status": "active",
-				"contract_type":   ContractType,
-				"feed_name":       res.Description,
-				"feed_path":       "",
-				"network_id":      "",
-				"network_name":    "",
-				"symbol":          "",
+				"contract_status":  "active",
+				"contract_type":    ContractType,
+				"feed_name":        res.Description,
+				"feed_path":        "",
+				"network_id":       "",
+				"network_name":     "",
+				"symbol":           "",
 			}).Set(1)
 		}
 	}()
@@ -325,8 +311,54 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, grpcConn *grp
 	h.ServeHTTP(w, r)
 }
 
+func extractEvents(data json.RawMessage) ([]tmrTypes.Event, error) {
+	value := gjson.Get(string(data), "data.value.TxResult.result.events")
+
+	var events []tmrTypes.Event
+	err := json.Unmarshal([]byte(value.Raw), &events)
+	if err != nil {
+		return nil, err
+	}
+
+	return events, nil
+}
+
 func main() {
 	fmt.Println(rpcAddr)
+	conn, err := subscriber.NewSubscriber("ws://" + WsUrl + "/websocket")
+	if err != nil {
+		panic(err)
+	}
+	responses := make(chan json.RawMessage)
+	queryParams := `tm.event='Tx'`
+	filter := []string{queryParams}
+
+	params, err := json.Marshal(filter)
+	if err != nil {
+		panic(err)
+	}
+
+	err = conn.Subscribe(context.Background(), "subscribe", "unsubscribe", params, responses)
+	if err != nil {
+		panic(err)
+	}
+
+	go func() {
+		for {
+			resp, ok := <-responses
+			if !ok {
+				return
+			}
+
+			response, err := extractEvents(resp)
+			if err != nil {
+				panic(err)
+			}
+
+			fmt.Println(response)
+		}
+	}()
+
 	grpcConn, err := grpc.Dial(
 		rpcAddr,
 		grpc.WithInsecure(),
