@@ -27,8 +27,8 @@ var (
 	ChainId       string
 	ContractType  = "flux_monitor"
 	ConstLabels   map[string]string
-	WsUrl         = os.Getenv("WS_URL")
 	rpcAddr       = os.Getenv("TERRA_RPC")
+	wsUrl         = os.Getenv("WS_URL")
 	TendermintRpc = os.Getenv("TENDERMINT_RPC")
 )
 
@@ -325,7 +325,7 @@ func extractEvents(data json.RawMessage) ([]tmrTypes.Event, error) {
 
 func main() {
 	fmt.Println(rpcAddr)
-	conn, err := subscriber.NewSubscriber("ws://" + WsUrl + "/websocket")
+	conn, err := subscriber.NewSubscriber("ws://" + wsUrl + "/websocket")
 	if err != nil {
 		panic(err)
 	}
