@@ -4,9 +4,10 @@ go 1.16
 
 require (
 	github.com/google/uuid v1.3.0
-	github.com/gorilla/websocket v1.4.2 // indirect
+	github.com/gorilla/websocket v1.4.2
 	github.com/prometheus/client_golang v1.11.0
 	github.com/rs/zerolog v1.23.0
+	github.com/segmentio/kafka-go v0.4.17
 	github.com/tendermint/tendermint v0.34.11
 	github.com/terra-money/core v0.5.0-rc0
 	github.com/tidwall/gjson v1.6.7

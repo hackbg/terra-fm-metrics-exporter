@@ -10,30 +10,33 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/hackbg/terra-chainlink-exporter/collector"
 	"github.com/hackbg/terra-chainlink-exporter/subscriber"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
-	tmrTypes "github.com/tendermint/tendermint/abci/types"
 	tmrpc "github.com/tendermint/tendermint/rpc/client/http"
-	wasmTypes "github.com/terra-money/core/x/wasm/types"
-	"github.com/tidwall/gjson"
 	"google.golang.org/grpc"
 )
 
-var aggregators = []string{"terra1tndcaqxkpc5ce9qee5ggqf430mr2z3pefe5wj6"}
+var aggregators = []string{}
+
+const (
+	ContractType = "flux_monitor"
+)
 
 var (
 	ChainId       string
-	ContractType  = "flux_monitor"
 	ConstLabels   map[string]string
 	rpcAddr       = os.Getenv("TERRA_RPC")
 	wsUrl         = os.Getenv("WS_URL")
 	TendermintRpc = os.Getenv("TENDERMINT_RPC")
+	KAFKA_SERVER  = os.Getenv("KAFKA_URL")
 )
 
 var log = zerolog.New(zerolog.ConsoleWriter{Out: os.Stdout}).With().Timestamp().Logger()
 
+// Terra responses
 type (
 	AggregatorConfigResponse struct {
 		Link               string `json:"link,omitempty"`
@@ -84,48 +87,7 @@ func setChainId() {
 	}
 }
 
-func getLatestBlockHeight() int64 {
-	client, err := tmrpc.New(TendermintRpc, "/websocket")
-	if err != nil {
-		log.Fatal().Err(err).Msg("Could not create Tendermint client")
-	}
-
-	status, err := client.Status(context.Background())
-	if err != nil {
-		log.Fatal().Err(err).Msg("Could not query Tendermint status")
-	}
-
-	log.Info().Str("network", status.NodeInfo.Network).Msg("Got network status from Tendermint")
-
-	latestHeight := status.SyncInfo.LatestBlockHeight
-	return latestHeight
-}
-
-func getLatestRoundData(wasmClient wasmTypes.QueryClient, aggregatorAddress string) (*wasmTypes.QueryContractStoreResponse, error) {
-	response, err := wasmClient.ContractStore(
-		context.Background(),
-		&wasmTypes.QueryContractStoreRequest{
-			ContractAddress: aggregatorAddress,
-			QueryMsg:        []byte(`{"get_latest_round_data": {}}`),
-		},
-	)
-
-	return response, err
-}
-
-func getAggregatorConfig(wasmClient wasmTypes.QueryClient, aggregatorAddress string) (*wasmTypes.QueryContractStoreResponse, error) {
-	response, err := wasmClient.ContractStore(
-		context.Background(),
-		&wasmTypes.QueryContractStoreRequest{
-			ContractAddress: aggregatorAddress,
-			QueryMsg:        []byte(`{"get_aggregator_config": {}}`),
-		},
-	)
-
-	return response, err
-}
-
-func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, grpcConn *grpc.ClientConn) {
+func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, c collector.Collector) {
 	sublogger := log.With().
 		Str("request-id", uuid.New().String()).
 		Logger()
@@ -225,12 +187,10 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, grpcConn *grp
 
 	var wg sync.WaitGroup
 
-	wasmClient := wasmTypes.NewQueryClient(grpcConn)
-
 	go func() {
 		defer wg.Done()
 		sublogger.Debug().Msg("Querying the node information")
-		height := getLatestBlockHeight()
+		height := c.GetLatestBlockHeight()
 		fmCurrentHeadGauge.With(prometheus.Labels{
 			"chain_id": ChainId,
 			// TODO
@@ -240,12 +200,17 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, grpcConn *grp
 	}()
 	wg.Add(1)
 
+	// if no aggregators supplied we should not try to query the chain
+	if len(aggregators) == 0 {
+		return
+	}
+
 	go func() {
 		defer wg.Done()
 		sublogger.Debug().Msg("Started querying aggregator answers")
 
 		for aggregator := range aggregators {
-			response, err := getLatestRoundData(wasmClient, aggregators[aggregator])
+			response, err := c.GetLatestRoundData(aggregators[aggregator])
 
 			if err != nil {
 				sublogger.Error().Err(err).Msg("Could not query the contract")
@@ -276,7 +241,7 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, grpcConn *grp
 		sublogger.Debug().Msg("Querying aggregators metadata")
 
 		for aggregator := range aggregators {
-			response, err := getAggregatorConfig(wasmClient, aggregators[aggregator])
+			response, err := c.GetAggregatorConfig(aggregators[aggregator])
 
 			if err != nil {
 				sublogger.Error().Err(err).Msg("Could not query the contract")
@@ -311,53 +276,12 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, grpcConn *grp
 	h.ServeHTTP(w, r)
 }
 
-func extractEvents(data json.RawMessage) ([]tmrTypes.Event, error) {
-	value := gjson.Get(string(data), "data.value.TxResult.result.events")
-
-	var events []tmrTypes.Event
-	err := json.Unmarshal([]byte(value.Raw), &events)
-	if err != nil {
-		return nil, err
-	}
-
-	return events, nil
-}
-
 func main() {
 	fmt.Println(rpcAddr)
-	conn, err := subscriber.NewSubscriber("ws://" + wsUrl + "/websocket")
+	wsConn, err := subscriber.NewSubscriber("ws://" + wsUrl + "/websocket")
 	if err != nil {
 		panic(err)
 	}
-	responses := make(chan json.RawMessage)
-	queryParams := `tm.event='Tx'`
-	filter := []string{queryParams}
-
-	params, err := json.Marshal(filter)
-	if err != nil {
-		panic(err)
-	}
-
-	err = conn.Subscribe(context.Background(), "subscribe", "unsubscribe", params, responses)
-	if err != nil {
-		panic(err)
-	}
-
-	go func() {
-		for {
-			resp, ok := <-responses
-			if !ok {
-				return
-			}
-
-			response, err := extractEvents(resp)
-			if err != nil {
-				panic(err)
-			}
-
-			fmt.Println(response)
-		}
-	}()
 
 	grpcConn, err := grpc.Dial(
 		rpcAddr,
@@ -367,12 +291,15 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
 	defer grpcConn.Close()
+
+	MetricsCollector := collector.NewCollector(grpcConn, wsConn, TendermintRpc)
 
 	setChainId()
 
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		TerraChainlinkHandler(w, r, grpcConn)
+		TerraChainlinkHandler(w, r, MetricsCollector)
 	})
 	err = http.ListenAndServe(":8089", nil)
 	if err != nil {
