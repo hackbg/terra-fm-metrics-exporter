@@ -2,12 +2,11 @@ package collector
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"os"
 	"strconv"
-	"time"
 
 	"github.com/hackbg/terra-chainlink-exporter/subscriber"
 	"github.com/hackbg/terra-chainlink-exporter/types"
@@ -20,61 +19,79 @@ import (
 	"google.golang.org/grpc"
 )
 
-// KAFKA THINGS
-
 type Collector struct {
 	TendermintClient *tmrpc.HTTP
 	WasmClient       wasmTypes.QueryClient
 }
 
-var KAFKA_SERVER = ""
+var KAFKA_SERVER = os.Getenv("KAFKA_SERVER")
 
-// Kafka writers
-var (
-	SubmissionReceivedWriter = kafka.NewWriter(kafka.WriterConfig{
-		Brokers:      []string{KAFKA_SERVER},
-		Topic:        "SubmissionReceived",
-		Balancer:     &kafka.LeastBytes{},
-		BatchTimeout: 50 * time.Millisecond,
-	})
-	NewRoundWriter = kafka.NewWriter(kafka.WriterConfig{
-		Brokers:      []string{KAFKA_SERVER},
-		Topic:        "NewRound",
-		Balancer:     &kafka.LeastBytes{},
-		BatchTimeout: 50 * time.Millisecond,
-	})
-	AnswerUpdated = kafka.NewWriter(kafka.WriterConfig{
-		Brokers:      []string{KAFKA_SERVER},
-		Topic:        "AnswerUpdated",
-		Balancer:     &kafka.LeastBytes{},
-		BatchTimeout: 50 * time.Millisecond,
-	})
-)
+func newKafkaWriter(kafkaUrl, topic string) *kafka.Writer {
+	return &kafka.Writer{
+		Addr:     kafka.TCP(kafkaUrl),
+		Topic:    topic,
+		Balancer: &kafka.LeastBytes{},
+	}
+}
 
 func NewCollector(grpcConn *grpc.ClientConn, wsConn subscriber.ISubscriber, TendermintRpc string) Collector {
 	client, err := tmrpc.New(TendermintRpc, "/websocket")
 	if err != nil {
 		log.Fatal().Err(err).Msg("Could not create Tendermint Client")
 	}
-	// kafka
+
+	// Kafka
+	writer := newKafkaWriter(KAFKA_SERVER, "Terra")
 	responses := make(chan json.RawMessage)
 	handler := func(event types.EventRecords) {
 		for _, round := range event.NewRound {
-			val := make([]byte, 4)
-			binary.LittleEndian.PutUint32(val, round.RoundId)
-			NewRoundWriter.WriteMessages(context.Background(),
+			res, err := json.Marshal(round)
+			if err != nil {
+				fmt.Println("ERROR WHILE PARSING")
+			}
+			err = writer.WriteMessages(context.Background(),
 				kafka.Message{
-					Key:   []byte("Round ID"),
-					Value: val,
+					Key:   []byte("NewRound"),
+					Value: res,
 				},
 			)
+			if err != nil {
+				fmt.Println(err)
+			}
+			fmt.Println("WRITTEN TO NEW ROUND")
 		}
-		// for _, round := range event.SubmissionReceived {
-
-		// }
-		// for _, update := range event.AnswerUpdated {
-
-		// }
+		for _, round := range event.SubmissionReceived {
+			res, err := json.Marshal(round)
+			if err != nil {
+				fmt.Println("Error while parsing")
+			}
+			err = writer.WriteMessages(context.Background(),
+				kafka.Message{
+					Key:   []byte("Submission Received"),
+					Value: res,
+				},
+			)
+			if err != nil {
+				fmt.Println(err)
+			}
+			fmt.Println("WRITTEN SUBMISSION")
+		}
+		for _, update := range event.AnswerUpdated {
+			res, err := json.Marshal(update)
+			if err != nil {
+				fmt.Println("Error while parsing")
+			}
+			err = writer.WriteMessages(context.Background(),
+				kafka.Message{
+					Key:   []byte("Answer Updated"),
+					Value: res,
+				},
+			)
+			if err != nil {
+				fmt.Println(err)
+			}
+			fmt.Println("WRITTEN SUBMISSION")
+		}
 	}
 	queryParams := `tm.event='Tx'`
 	filter := []string{queryParams}
@@ -152,8 +169,6 @@ func (collector Collector) GetAggregatorConfig(aggregatorAddress string) (*wasmT
 	return response, err
 }
 
-// START EVENTS
-
 func extractEvents(data json.RawMessage) ([]tmrTypes.Event, error) {
 	value := gjson.Get(string(data), "data.value.TxResult.result.events")
 
@@ -170,7 +185,6 @@ func parseEvents(events []tmrTypes.Event) (*types.EventRecords, error) {
 	var eventRecords types.EventRecords
 
 	for _, event := range events {
-		fmt.Println(event.Type)
 		switch event.Type {
 		case "wasm-new_round":
 			newRound, err := parseNewRoundEvent(event)
@@ -243,7 +257,7 @@ func parseSubmissionReceivedEvent(event tmrTypes.Event) (*types.EventSubmissionR
 
 	return &types.EventSubmissionReceived{
 		Oracle:     types.Addr(attributes["oracle"]),
-		Submission: types.Value{*submission},
+		Submission: types.Value{Key: *submission},
 		RoundId:    uint32(roundId),
 	}, nil
 }
@@ -263,7 +277,7 @@ func parseAnswerUpdatedEvent(event tmrTypes.Event) (*types.EventAnswerUpdated, e
 	value, _ = value.SetString(attributes["current"], 10)
 
 	return &types.EventAnswerUpdated{
-		Value:   types.Value{*value},
+		Value:   types.Value{Key: *value},
 		RoundId: uint32(roundId),
 	}, nil
 }

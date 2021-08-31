@@ -3,14 +3,18 @@ package types
 import "math/big"
 
 type Value struct {
-	big.Int
+	Key big.Int
 }
 
 func (v *Value) UnmarshalJSON(data []byte) error {
 	var i big.Int
-	*v = Value{*i.SetBytes(data)}
+	*v = Value{Key: *i.SetBytes(data)}
 
 	return nil
+}
+
+func (b Value) MarshalJSON() ([]byte, error) {
+	return []byte(b.Key.String()), nil
 }
 
 type Addr string
@@ -49,13 +53,13 @@ type OptionAddr struct {
 
 // Events
 type EventNewRound struct {
-	RoundId   uint32
-	StartedBy Addr
-	StartedAt uint64
+	RoundId   uint32 `json:"RoundId"`
+	StartedBy Addr   `json:"StartedBy"`
+	StartedAt uint64 `json:"StartedAt"`
 }
 
 type EventRoundDetailsUpdated struct {
-	PaymentAmount  Value
+	PaymentAmount  Value `json:"value"`
 	MinSubmissions uint32
 	MaxSubmissions uint32
 	RestartDelay   uint32
@@ -84,7 +88,6 @@ type QueryResponse struct {
 }
 
 type EventRecords struct {
-	// FluxMonitor requests
 	NewRound                 []EventNewRound
 	RoundDetailsUpdated      []EventRoundDetailsUpdated
 	OraclePermissionsUpdated []EventOraclePermissionsUpdated

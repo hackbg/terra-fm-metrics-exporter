@@ -26,12 +26,12 @@ const (
 )
 
 var (
-	ChainId       string
-	ConstLabels   map[string]string
-	rpcAddr       = os.Getenv("TERRA_RPC")
-	wsUrl         = os.Getenv("WS_URL")
-	TendermintRpc = os.Getenv("TENDERMINT_RPC")
-	KAFKA_SERVER  = os.Getenv("KAFKA_URL")
+	ChainId        string
+	ConstLabels    map[string]string
+	RPC_ADDR       = os.Getenv("TERRA_RPC")
+	WS_URL         = os.Getenv("WS_URL")
+	TENDERMINT_RPC = os.Getenv("TENDERMINT_RPC")
+	KAFKA_SERVER   = os.Getenv("KAFKA_SERVER")
 )
 
 var log = zerolog.New(zerolog.ConsoleWriter{Out: os.Stdout}).With().Timestamp().Logger()
@@ -69,7 +69,7 @@ func StringToInt(s string) int {
 }
 
 func setChainId() {
-	client, err := tmrpc.New(TendermintRpc, "/websocket")
+	client, err := tmrpc.New(TENDERMINT_RPC, "/websocket")
 	if err != nil {
 		log.Fatal().Err(err).Msg("Could not create Tendermint client")
 	}
@@ -93,7 +93,6 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, c collector.C
 		Logger()
 
 	// Gauges
-
 	nodeMetadataGauge := prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name:        "node_metadata",
@@ -277,14 +276,13 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, c collector.C
 }
 
 func main() {
-	fmt.Println(rpcAddr)
-	wsConn, err := subscriber.NewSubscriber("ws://" + wsUrl + "/websocket")
+	wsConn, err := subscriber.NewSubscriber("ws://" + WS_URL + "/websocket")
 	if err != nil {
 		panic(err)
 	}
 
 	grpcConn, err := grpc.Dial(
-		rpcAddr,
+		RPC_ADDR,
 		grpc.WithInsecure(),
 	)
 
@@ -294,7 +292,7 @@ func main() {
 
 	defer grpcConn.Close()
 
-	MetricsCollector := collector.NewCollector(grpcConn, wsConn, TendermintRpc)
+	MetricsCollector := collector.NewCollector(grpcConn, wsConn, TENDERMINT_RPC)
 
 	setChainId()
 
