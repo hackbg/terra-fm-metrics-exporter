@@ -2,20 +2,20 @@ package collector
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"os"
 	"strconv"
 
-	"github.com/hackbg/terra-chainlink-exporter/subscriber"
 	"github.com/hackbg/terra-chainlink-exporter/types"
 	"github.com/rs/zerolog/log"
 	"github.com/segmentio/kafka-go"
 	tmrTypes "github.com/tendermint/tendermint/abci/types"
 	tmrpc "github.com/tendermint/tendermint/rpc/client/http"
+	tmTypes "github.com/tendermint/tendermint/types"
 	wasmTypes "github.com/terra-money/core/x/wasm/types"
-	"github.com/tidwall/gjson"
 	"google.golang.org/grpc"
 )
 
@@ -34,20 +34,26 @@ func newKafkaWriter(kafkaUrl, topic string) *kafka.Writer {
 	}
 }
 
-func NewCollector(grpcConn *grpc.ClientConn, wsConn subscriber.ISubscriber, TendermintRpc string) Collector {
+func NewCollector(grpcConn *grpc.ClientConn, TendermintRpc string) Collector {
+
 	client, err := tmrpc.New(TendermintRpc, "/websocket")
 	if err != nil {
 		log.Fatal().Err(err).Msg("Could not create Tendermint Client")
 	}
 
+	err = client.Start()
+	if err != nil {
+		fmt.Println(err)
+	}
+
 	// Kafka
 	writer := newKafkaWriter(KAFKA_SERVER, "Terra")
-	responses := make(chan json.RawMessage)
+
 	handler := func(event types.EventRecords) {
 		for _, round := range event.NewRound {
 			res, err := json.Marshal(round)
 			if err != nil {
-				fmt.Println("ERROR WHILE PARSING")
+				continue
 			}
 			err = writer.WriteMessages(context.Background(),
 				kafka.Message{
@@ -63,7 +69,7 @@ func NewCollector(grpcConn *grpc.ClientConn, wsConn subscriber.ISubscriber, Tend
 		for _, round := range event.SubmissionReceived {
 			res, err := json.Marshal(round)
 			if err != nil {
-				fmt.Println("Error while parsing")
+				continue
 			}
 			err = writer.WriteMessages(context.Background(),
 				kafka.Message{
@@ -79,7 +85,7 @@ func NewCollector(grpcConn *grpc.ClientConn, wsConn subscriber.ISubscriber, Tend
 		for _, update := range event.AnswerUpdated {
 			res, err := json.Marshal(update)
 			if err != nil {
-				fmt.Println("Error while parsing")
+				continue
 			}
 			err = writer.WriteMessages(context.Background(),
 				kafka.Message{
@@ -93,31 +99,29 @@ func NewCollector(grpcConn *grpc.ClientConn, wsConn subscriber.ISubscriber, Tend
 			fmt.Println("WRITTEN SUBMISSION")
 		}
 	}
-	queryParams := `tm.event='Tx'`
-	filter := []string{queryParams}
+	queryParams := `tm.event='Tx' AND execute_contract.contract_address='terra1tndcaqxkpc5ce9qee5ggqf430mr2z3pefe5wj6'`
 
-	params, err := json.Marshal(filter)
 	if err != nil {
 		panic(err)
 	}
 
-	err = wsConn.Subscribe(context.Background(), "subscribe", "unsubscribe", params, responses)
+	//err = wsConn.Subscribe(context.Background(), "subscribe", "unsubscribe", params, responses)
+	out, err := client.Subscribe(context.Background(), "sub", queryParams)
 	if err != nil {
 		panic(err)
 	}
 
 	go func() {
 		for {
-			resp, ok := <-responses
+			resp, ok := <-out
 			if !ok {
 				return
 			}
-
-			events, err := extractEvents(resp)
+			info := extractTxInfo(resp.Data.(tmTypes.EventDataTx))
 			if err != nil {
 				continue
 			}
-			eventRecords, err := parseEvents(events)
+			eventRecords, err := parseEvents(resp.Data.(tmTypes.EventDataTx).Result.Events, info)
 			if err != nil {
 				continue
 			}
@@ -133,6 +137,7 @@ func NewCollector(grpcConn *grpc.ClientConn, wsConn subscriber.ISubscriber, Tend
 	}
 }
 
+// Queries
 func (collector Collector) GetLatestBlockHeight() int64 {
 	status, err := collector.TendermintClient.Status(context.Background())
 	if err != nil {
@@ -169,37 +174,40 @@ func (collector Collector) GetAggregatorConfig(aggregatorAddress string) (*wasmT
 	return response, err
 }
 
-func extractEvents(data json.RawMessage) ([]tmrTypes.Event, error) {
-	value := gjson.Get(string(data), "data.value.TxResult.result.events")
-
-	var events []tmrTypes.Event
-	err := json.Unmarshal([]byte(value.Raw), &events)
-	if err != nil {
-		return nil, err
+// Events
+func extractTxInfo(data tmTypes.EventDataTx) types.TxInfo {
+	h := sha256.Sum256(data.Tx)
+	var txInfo = types.TxInfo{
+		Height: data.Height,
+		Tx:     fmt.Sprintf("%x", h[:]),
 	}
-
-	return events, nil
+	return txInfo
 }
 
-func parseEvents(events []tmrTypes.Event) (*types.EventRecords, error) {
+func parseEvents(events []tmrTypes.Event, txInfo types.TxInfo) (*types.EventRecords, error) {
 	var eventRecords types.EventRecords
-
 	for _, event := range events {
 		switch event.Type {
 		case "wasm-new_round":
 			newRound, err := parseNewRoundEvent(event)
+			newRound.Height = txInfo.Height
+			newRound.TxHash = txInfo.Tx
 			if err != nil {
 				return nil, err
 			}
 			eventRecords.NewRound = append(eventRecords.NewRound, *newRound)
 		case "wasm-submission_received":
 			submission, err := parseSubmissionReceivedEvent(event)
+			submission.Height = txInfo.Height
+			submission.TxHash = txInfo.Tx
 			if err != nil {
 				return nil, err
 			}
 			eventRecords.SubmissionReceived = append(eventRecords.SubmissionReceived, *submission)
 		case "wasm-answer_updated":
 			answerUpdated, err := parseAnswerUpdatedEvent(event)
+			answerUpdated.Height = txInfo.Height
+			answerUpdated.TxHash = txInfo.Tx
 			if err != nil {
 				return nil, err
 			}
@@ -225,19 +233,9 @@ func parseNewRoundEvent(event tmrTypes.Event) (*types.EventNewRound, error) {
 	if err != nil {
 		return nil, err
 	}
-	var startedAt uint64
-	startedAtStr, err := getAttributeValue(event, "started_at")
-	if err == nil {
-		value, err := strconv.Atoi(startedAtStr)
-		if err != nil {
-			return nil, err
-		}
-		startedAt = uint64(value)
-	}
+
 	return &types.EventNewRound{
-		RoundId:   uint32(roundId),
-		StartedBy: types.Addr(attributes["started_by"]),
-		StartedAt: startedAt,
+		RoundId: uint32(roundId),
 	}, nil
 }
 
@@ -246,19 +244,11 @@ func parseSubmissionReceivedEvent(event tmrTypes.Event) (*types.EventSubmissionR
 	if err != nil {
 		return nil, err
 	}
-
 	submission := new(big.Int)
 	submission, _ = submission.SetString(attributes["submission"], 10)
-
-	roundId, err := strconv.Atoi(attributes["round_id"])
-	if err != nil {
-		return nil, err
-	}
-
 	return &types.EventSubmissionReceived{
-		Oracle:     types.Addr(attributes["oracle"]),
+		Sender:     types.Addr(attributes["oracle"]),
 		Submission: types.Value{Key: *submission},
-		RoundId:    uint32(roundId),
 	}, nil
 }
 

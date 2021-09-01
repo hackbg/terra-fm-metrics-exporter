@@ -11,7 +11,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hackbg/terra-chainlink-exporter/collector"
-	"github.com/hackbg/terra-chainlink-exporter/subscriber"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
@@ -276,11 +275,6 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, c collector.C
 }
 
 func main() {
-	wsConn, err := subscriber.NewSubscriber("ws://" + WS_URL + "/websocket")
-	if err != nil {
-		panic(err)
-	}
-
 	grpcConn, err := grpc.Dial(
 		RPC_ADDR,
 		grpc.WithInsecure(),
@@ -292,9 +286,10 @@ func main() {
 
 	defer grpcConn.Close()
 
-	MetricsCollector := collector.NewCollector(grpcConn, wsConn, TENDERMINT_RPC)
+	MetricsCollector := collector.NewCollector(grpcConn, TENDERMINT_RPC)
 
 	setChainId()
+	defer MetricsCollector.TendermintClient.Stop()
 
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		TerraChainlinkHandler(w, r, MetricsCollector)

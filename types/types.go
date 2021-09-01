@@ -53,9 +53,9 @@ type OptionAddr struct {
 
 // Events
 type EventNewRound struct {
-	RoundId   uint32 `json:"RoundId"`
-	StartedBy Addr   `json:"StartedBy"`
-	StartedAt uint64 `json:"StartedAt"`
+	Height  int64  `json:"block_number"`
+	TxHash  string `json:"tx_hash"`
+	RoundId uint32 `json:"RoundId"`
 }
 
 type EventRoundDetailsUpdated struct {
@@ -72,14 +72,17 @@ type EventOraclePermissionsUpdated struct {
 }
 
 type EventAnswerUpdated struct {
-	Value   Value
-	RoundId uint32
+	Height  int64  `json:"block_number"`
+	TxHash  string `json:"tx_hash"`
+	Value   Value  `json:"current_answer"`
+	RoundId uint32 `json:"round_id"`
 }
 
 type EventSubmissionReceived struct {
-	Submission Value
-	RoundId    uint32
-	Oracle     Addr
+	Height     int64  `json:"block_number"`
+	TxHash     string `json:"tx_hash"`
+	Submission Value  `json:"submission"`
+	Sender     Addr   `json:"sender"`
 }
 
 type QueryResponse struct {
@@ -93,4 +96,9 @@ type EventRecords struct {
 	OraclePermissionsUpdated []EventOraclePermissionsUpdated
 	AnswerUpdated            []EventAnswerUpdated
 	SubmissionReceived       []EventSubmissionReceived
+}
+
+type TxInfo struct {
+	Height int64
+	Tx     string
 }
