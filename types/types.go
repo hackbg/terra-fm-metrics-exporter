@@ -1,6 +1,11 @@
 package types
 
-import "math/big"
+import (
+	"context"
+	"math/big"
+
+	ctypes "github.com/tendermint/tendermint/rpc/core/types"
+)
 
 type Value struct {
 	Key big.Int
@@ -101,4 +106,20 @@ type EventRecords struct {
 type TxInfo struct {
 	Height int64
 	Tx     string
+}
+
+type Manager interface {
+	Stop()
+}
+
+type Collector interface {
+	Subscribe(ctx context.Context, method string, params string) (out chan<- ctypes.ResultEvent, err error)
+}
+type Publisher interface {
+	WriteMessage(ctx context.Context)
+}
+type FeedManager interface {
+	Manager
+	Collector
+	Publisher
 }

@@ -11,12 +11,17 @@ import (
 
 	"github.com/hackbg/terra-chainlink-exporter/types"
 	"github.com/rs/zerolog/log"
-	"github.com/segmentio/kafka-go"
 	tmrTypes "github.com/tendermint/tendermint/abci/types"
 	tmrpc "github.com/tendermint/tendermint/rpc/client/http"
+	ctypes "github.com/tendermint/tendermint/rpc/core/types"
 	tmTypes "github.com/tendermint/tendermint/types"
 	wasmTypes "github.com/terra-money/core/x/wasm/types"
 	"google.golang.org/grpc"
+)
+
+var (
+	RPC_ADDR       = os.Getenv("TERRA_RPC")
+	TENDERMINT_RPC = os.Getenv("TENDERMINT_RPC")
 )
 
 type Collector struct {
@@ -24,19 +29,21 @@ type Collector struct {
 	WasmClient       wasmTypes.QueryClient
 }
 
-var KAFKA_SERVER = os.Getenv("KAFKA_SERVER")
-
-func newKafkaWriter(kafkaUrl, topic string) *kafka.Writer {
-	return &kafka.Writer{
-		Addr:     kafka.TCP(kafkaUrl),
-		Topic:    topic,
-		Balancer: &kafka.LeastBytes{},
-	}
+func (c *Collector) Subscribe(ctx context.Context, method string, params string) (out <-chan ctypes.ResultEvent, err error) {
+	return c.TendermintClient.Subscribe(ctx, method, params)
 }
 
-func NewCollector(grpcConn *grpc.ClientConn, TendermintRpc string) Collector {
+func NewCollector() (*Collector, error) {
 
-	client, err := tmrpc.New(TendermintRpc, "/websocket")
+	grpcConn, err := grpc.Dial(
+		RPC_ADDR,
+		grpc.WithInsecure(),
+	)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Could not establish a grpc connection")
+	}
+
+	client, err := tmrpc.New(TENDERMINT_RPC, "/websocket")
 	if err != nil {
 		log.Fatal().Err(err).Msg("Could not create Tendermint Client")
 	}
@@ -46,100 +53,15 @@ func NewCollector(grpcConn *grpc.ClientConn, TendermintRpc string) Collector {
 		fmt.Println(err)
 	}
 
-	// Kafka
-	writer := newKafkaWriter(KAFKA_SERVER, "Terra")
-
-	handler := func(event types.EventRecords) {
-		for _, round := range event.NewRound {
-			res, err := json.Marshal(round)
-			if err != nil {
-				continue
-			}
-			err = writer.WriteMessages(context.Background(),
-				kafka.Message{
-					Key:   []byte("NewRound"),
-					Value: res,
-				},
-			)
-			if err != nil {
-				fmt.Println(err)
-			}
-			fmt.Println("WRITTEN TO NEW ROUND")
-		}
-		for _, round := range event.SubmissionReceived {
-			res, err := json.Marshal(round)
-			if err != nil {
-				continue
-			}
-			err = writer.WriteMessages(context.Background(),
-				kafka.Message{
-					Key:   []byte("Submission Received"),
-					Value: res,
-				},
-			)
-			if err != nil {
-				fmt.Println(err)
-			}
-			fmt.Println("WRITTEN SUBMISSION")
-		}
-		for _, update := range event.AnswerUpdated {
-			res, err := json.Marshal(update)
-			if err != nil {
-				continue
-			}
-			err = writer.WriteMessages(context.Background(),
-				kafka.Message{
-					Key:   []byte("Answer Updated"),
-					Value: res,
-				},
-			)
-			if err != nil {
-				fmt.Println(err)
-			}
-			fmt.Println("WRITTEN SUBMISSION")
-		}
-	}
-	queryParams := `tm.event='Tx' AND execute_contract.contract_address='terra1tndcaqxkpc5ce9qee5ggqf430mr2z3pefe5wj6'`
-
-	if err != nil {
-		panic(err)
-	}
-
-	//err = wsConn.Subscribe(context.Background(), "subscribe", "unsubscribe", params, responses)
-	out, err := client.Subscribe(context.Background(), "sub", queryParams)
-	if err != nil {
-		panic(err)
-	}
-
-	go func() {
-		for {
-			resp, ok := <-out
-			if !ok {
-				return
-			}
-			info := extractTxInfo(resp.Data.(tmTypes.EventDataTx))
-			if err != nil {
-				continue
-			}
-			eventRecords, err := parseEvents(resp.Data.(tmTypes.EventDataTx).Result.Events, info)
-			if err != nil {
-				continue
-			}
-			if eventRecords != nil {
-				handler(*eventRecords)
-			}
-		}
-	}()
-
-	return Collector{
+	return &Collector{
 		TendermintClient: client,
 		WasmClient:       wasmTypes.NewQueryClient(grpcConn),
-	}
+	}, nil
 }
 
 // Queries
-func (collector Collector) GetLatestBlockHeight() int64 {
-	status, err := collector.TendermintClient.Status(context.Background())
+func GetLatestBlockHeight(c Collector) int64 {
+	status, err := c.TendermintClient.Status(context.Background())
 	if err != nil {
 		log.Fatal().Err(err).Msg("Could not query Tendermint status")
 	}
@@ -150,8 +72,8 @@ func (collector Collector) GetLatestBlockHeight() int64 {
 	return latestHeight
 }
 
-func (collector Collector) GetLatestRoundData(aggregatorAddress string) (*wasmTypes.QueryContractStoreResponse, error) {
-	response, err := collector.WasmClient.ContractStore(
+func (c Collector) GetLatestRoundData(aggregatorAddress string) (*wasmTypes.QueryContractStoreResponse, error) {
+	response, err := c.WasmClient.ContractStore(
 		context.Background(),
 		&wasmTypes.QueryContractStoreRequest{
 			ContractAddress: aggregatorAddress,
@@ -162,8 +84,8 @@ func (collector Collector) GetLatestRoundData(aggregatorAddress string) (*wasmTy
 	return response, err
 }
 
-func (collector Collector) GetAggregatorConfig(aggregatorAddress string) (*wasmTypes.QueryContractStoreResponse, error) {
-	response, err := collector.WasmClient.ContractStore(
+func (c Collector) GetAggregatorConfig(aggregatorAddress string) (*wasmTypes.QueryContractStoreResponse, error) {
+	response, err := c.WasmClient.ContractStore(
 		context.Background(),
 		&wasmTypes.QueryContractStoreRequest{
 			ContractAddress: aggregatorAddress,
@@ -175,7 +97,7 @@ func (collector Collector) GetAggregatorConfig(aggregatorAddress string) (*wasmT
 }
 
 // Events
-func extractTxInfo(data tmTypes.EventDataTx) types.TxInfo {
+func ExtractTxInfo(data tmTypes.EventDataTx) types.TxInfo {
 	h := sha256.Sum256(data.Tx)
 	var txInfo = types.TxInfo{
 		Height: data.Height,
@@ -184,7 +106,7 @@ func extractTxInfo(data tmTypes.EventDataTx) types.TxInfo {
 	return txInfo
 }
 
-func parseEvents(events []tmrTypes.Event, txInfo types.TxInfo) (*types.EventRecords, error) {
+func ParseEvents(events []tmrTypes.Event, txInfo types.TxInfo) (*types.EventRecords, error) {
 	var eventRecords types.EventRecords
 	for _, event := range events {
 		switch event.Type {

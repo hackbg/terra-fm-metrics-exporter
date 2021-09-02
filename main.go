@@ -11,14 +11,14 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hackbg/terra-chainlink-exporter/collector"
+	"github.com/hackbg/terra-chainlink-exporter/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
+	"github.com/segmentio/kafka-go"
 	tmrpc "github.com/tendermint/tendermint/rpc/client/http"
-	"google.golang.org/grpc"
+	tmTypes "github.com/tendermint/tendermint/types"
 )
-
-var aggregators = []string{}
 
 const (
 	ContractType = "flux_monitor"
@@ -31,9 +31,140 @@ var (
 	WS_URL         = os.Getenv("WS_URL")
 	TENDERMINT_RPC = os.Getenv("TENDERMINT_RPC")
 	KAFKA_SERVER   = os.Getenv("KAFKA_SERVER")
+	TOPIC          = os.Getenv("TOPIC")
 )
 
 var log = zerolog.New(zerolog.ConsoleWriter{Out: os.Stdout}).With().Timestamp().Logger()
+
+func newKafkaWriter(kafkaUrl, topic string) *kafka.Writer {
+	return &kafka.Writer{
+		Addr:     kafka.TCP(kafkaUrl),
+		Topic:    topic,
+		Balancer: &kafka.LeastBytes{},
+	}
+}
+
+type Feed struct {
+	ContractAddress string
+	ContractVersion int
+	DecimalPlaces   int
+	Heartbeat       int64
+	History         bool
+	Multiply        string
+	Name            string
+	Symbol          string
+	Pair            []string
+	Path            string
+	NodeCount       int
+	Status          string
+}
+
+type manager struct {
+	Feed
+	collector collector.Collector
+	writer    *kafka.Writer
+}
+
+func (m *manager) Stop() {
+	// TODO
+}
+
+func createManager(feed Feed) (*manager, error) {
+	fmt.Printf("Creating a feed with address: %s and name: %s", feed.ContractAddress, feed.Name)
+	collector, err := collector.NewCollector()
+	writer := newKafkaWriter(KAFKA_SERVER, TOPIC)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &manager{
+		Feed:      feed,
+		collector: *collector,
+		writer:    writer,
+	}, nil
+}
+
+func (m *manager) subscribe() error {
+	subQuery := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", m.Feed.ContractAddress)
+	out, err := m.collector.Subscribe(context.Background(), "subscribe", subQuery)
+
+	handler := func(event types.EventRecords) {
+		for _, round := range event.NewRound {
+			res, err := json.Marshal(round)
+			if err != nil {
+				continue
+			}
+			fmt.Println(round)
+			err = m.writer.WriteMessages(context.Background(),
+				kafka.Message{
+					Key:   []byte("NewRound"),
+					Value: res,
+				},
+			)
+			if err != nil {
+				fmt.Println(err)
+			}
+			fmt.Println("WRITTEN TO NEW ROUND")
+		}
+		for _, round := range event.SubmissionReceived {
+			fmt.Println(round)
+			res, err := json.Marshal(round)
+			if err != nil {
+				continue
+			}
+			err = m.writer.WriteMessages(context.Background(),
+				kafka.Message{
+					Key:   []byte("Submission Received"),
+					Value: res,
+				},
+			)
+			if err != nil {
+				fmt.Println(err)
+			}
+			fmt.Println("WRITTEN SUBMISSION")
+		}
+		for _, update := range event.AnswerUpdated {
+			fmt.Println(update)
+			res, err := json.Marshal(update)
+			if err != nil {
+				continue
+			}
+			err = m.writer.WriteMessages(context.Background(),
+				kafka.Message{
+					Key:   []byte("Answer Updated"),
+					Value: res,
+				},
+			)
+			if err != nil {
+				fmt.Println(err)
+			}
+			fmt.Println("WRITTEN SUBMISSION")
+		}
+	}
+
+	go func() {
+		for {
+			resp, ok := <-out
+			if !ok {
+				return
+			}
+			info := collector.ExtractTxInfo(resp.Data.(tmTypes.EventDataTx))
+			if err != nil {
+				continue
+			}
+			eventRecords, err := collector.ParseEvents(resp.Data.(tmTypes.EventDataTx).Result.Events, info)
+			if err != nil {
+				continue
+			}
+			if eventRecords != nil {
+				handler(*eventRecords)
+			}
+		}
+	}()
+
+	return nil
+}
 
 // Terra responses
 type (
@@ -86,7 +217,7 @@ func setChainId() {
 	}
 }
 
-func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, c collector.Collector) {
+func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers []manager) {
 	sublogger := log.With().
 		Str("request-id", uuid.New().String()).
 		Logger()
@@ -143,8 +274,6 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, c collector.C
 		[]string{"contract_address"},
 	)
 
-	// Counters
-	// Should be possible?
 	fmAnswersTotal := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "flux_monitor_answers_total",
@@ -188,7 +317,8 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, c collector.C
 	go func() {
 		defer wg.Done()
 		sublogger.Debug().Msg("Querying the node information")
-		height := c.GetLatestBlockHeight()
+		// TODO
+		height := collector.GetLatestBlockHeight(managers[0].collector)
 		fmCurrentHeadGauge.With(prometheus.Labels{
 			"chain_id": ChainId,
 			// TODO
@@ -198,17 +328,12 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, c collector.C
 	}()
 	wg.Add(1)
 
-	// if no aggregators supplied we should not try to query the chain
-	if len(aggregators) == 0 {
-		return
-	}
-
 	go func() {
 		defer wg.Done()
 		sublogger.Debug().Msg("Started querying aggregator answers")
 
-		for aggregator := range aggregators {
-			response, err := c.GetLatestRoundData(aggregators[aggregator])
+		for _, manager := range managers {
+			response, err := manager.collector.GetLatestRoundData(manager.Feed.ContractAddress)
 
 			if err != nil {
 				sublogger.Error().Err(err).Msg("Could not query the contract")
@@ -224,11 +349,11 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, c collector.C
 			}
 
 			fmAnswersGauge.With(prometheus.Labels{
-				"contract_address": aggregators[aggregator],
+				"contract_address": manager.Feed.ContractAddress,
 			}).Set(float64(StringToInt(res.Answer)))
 
 			fmAnswersTotal.With(prometheus.Labels{
-				"contract_address": aggregators[aggregator],
+				"contract_address": manager.Feed.ContractAddress,
 			}).Add(float64(res.RoundId))
 		}
 	}()
@@ -238,8 +363,8 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, c collector.C
 		defer wg.Done()
 		sublogger.Debug().Msg("Querying aggregators metadata")
 
-		for aggregator := range aggregators {
-			response, err := c.GetAggregatorConfig(aggregators[aggregator])
+		for _, manager := range managers {
+			response, err := manager.collector.GetAggregatorConfig(manager.Feed.ContractAddress)
 
 			if err != nil {
 				sublogger.Error().Err(err).Msg("Could not query the contract")
@@ -256,14 +381,14 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, c collector.C
 
 			feedContractMetadataGauge.With(prometheus.Labels{
 				"chain_id":         ChainId,
-				"contract_address": aggregators[aggregator],
-				"contract_status":  "active",
+				"contract_address": manager.Feed.ContractAddress,
+				"contract_status":  manager.Feed.Status,
 				"contract_type":    ContractType,
-				"feed_name":        res.Description,
-				"feed_path":        "",
+				"feed_name":        manager.Feed.Name,
+				"feed_path":        manager.Feed.Path,
 				"network_id":       "",
 				"network_name":     "",
-				"symbol":           "",
+				"symbol":           manager.Feed.Symbol,
 			}).Set(1)
 		}
 	}()
@@ -275,25 +400,63 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, c collector.C
 }
 
 func main() {
-	grpcConn, err := grpc.Dial(
-		RPC_ADDR,
-		grpc.WithInsecure(),
-	)
-
-	if err != nil {
-		panic(err)
+	feed := Feed{
+		ContractAddress: "terra1tndcaqxkpc5ce9qee5ggqf430mr2z3pefe5wj6",
+		ContractVersion: 1,
+		DecimalPlaces:   8,
+		Heartbeat:       100,
+		History:         false,
+		Multiply:        "1000000",
+		Name:            "LINK / USD",
+		Symbol:          "$",
+		Pair:            []string{"LINK", "USD"},
+		Path:            "link_usd",
+		NodeCount:       1,
+		Status:          "live",
+	}
+	feed1 := Feed{
+		ContractAddress: "terra1z449mpul3pwkdd3892gv28ewv5l06w7895wewm",
+		ContractVersion: 1,
+		DecimalPlaces:   8,
+		Heartbeat:       100,
+		History:         false,
+		Multiply:        "1000000",
+		Name:            "LUNA / USD",
+		Symbol:          "$",
+		Pair:            []string{"LUNA", "USD"},
+		Path:            "luna_usd",
+		NodeCount:       1,
+		Status:          "live",
 	}
 
-	defer grpcConn.Close()
+	feedManager, err := createManager(feed)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Could not create feed manager")
+	}
+	defer feedManager.collector.TendermintClient.Stop()
 
-	MetricsCollector := collector.NewCollector(grpcConn, TENDERMINT_RPC)
+	err = feedManager.subscribe()
 
-	setChainId()
-	defer MetricsCollector.TendermintClient.Stop()
+	if err != nil {
+		log.Fatal().Err(err).Msg("Could not create feed manager")
+	}
+
+	feedManager1, err := createManager(feed1)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Could not create feed manager")
+	}
+	defer feedManager1.collector.TendermintClient.Stop()
+
+	err = feedManager1.subscribe()
+
+	if err != nil {
+		log.Fatal().Err(err).Msg("Could not create feed manager")
+	}
 
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		TerraChainlinkHandler(w, r, MetricsCollector)
+		TerraChainlinkHandler(w, r, []manager{*feedManager, *feedManager1})
 	})
+
 	err = http.ListenAndServe(":8089", nil)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Could not start application")
