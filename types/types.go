@@ -1,10 +1,7 @@
 package types
 
 import (
-	"context"
 	"math/big"
-
-	ctypes "github.com/tendermint/tendermint/rpc/core/types"
 )
 
 type Value struct {
@@ -87,6 +84,7 @@ type EventSubmissionReceived struct {
 	Height     int64  `json:"block_number"`
 	TxHash     string `json:"tx_hash"`
 	Submission Value  `json:"submission"`
+	RoundId    uint32 `json:"round_id"`
 	Sender     Addr   `json:"sender"`
 }
 
@@ -107,19 +105,22 @@ type TxInfo struct {
 	Height int64
 	Tx     string
 }
-
-type Manager interface {
-	Stop()
+type Feed struct {
+	ContractAddress string
+	ContractVersion int
+	DecimalPlaces   int
+	Heartbeat       int64
+	History         bool
+	Multiply        string
+	Name            string
+	Symbol          string
+	Pair            []string
+	Path            string
+	NodeCount       int
+	Status          string
 }
 
-type Collector interface {
-	Subscribe(ctx context.Context, method string, params string) (out chan<- ctypes.ResultEvent, err error)
-}
-type Publisher interface {
-	WriteMessage(ctx context.Context)
-}
-type FeedManager interface {
-	Manager
-	Collector
-	Publisher
+type LatestRoundInfo struct {
+	RoundId     uint32 `json:"round_id"`
+	Submissions uint32 `json:"submissions"`
 }

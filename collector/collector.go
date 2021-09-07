@@ -33,7 +33,7 @@ func (c *Collector) Subscribe(ctx context.Context, method string, params string)
 	return c.TendermintClient.Subscribe(ctx, method, params)
 }
 
-func NewCollector() (*Collector, error) {
+func NewCollector(client tmrpc.HTTP) (*Collector, error) {
 
 	grpcConn, err := grpc.Dial(
 		RPC_ADDR,
@@ -43,18 +43,13 @@ func NewCollector() (*Collector, error) {
 		log.Fatal().Err(err).Msg("Could not establish a grpc connection")
 	}
 
-	client, err := tmrpc.New(TENDERMINT_RPC, "/websocket")
-	if err != nil {
-		log.Fatal().Err(err).Msg("Could not create Tendermint Client")
-	}
-
 	err = client.Start()
 	if err != nil {
 		fmt.Println(err)
 	}
 
 	return &Collector{
-		TendermintClient: client,
+		TendermintClient: &client,
 		WasmClient:       wasmTypes.NewQueryClient(grpcConn),
 	}, nil
 }
@@ -166,10 +161,17 @@ func parseSubmissionReceivedEvent(event tmrTypes.Event) (*types.EventSubmissionR
 	if err != nil {
 		return nil, err
 	}
+
+	roundId, err := strconv.Atoi(attributes["round_id"])
+	if err != nil {
+		return nil, err
+	}
+
 	submission := new(big.Int)
 	submission, _ = submission.SetString(attributes["submission"], 10)
 	return &types.EventSubmissionReceived{
 		Sender:     types.Addr(attributes["oracle"]),
+		RoundId:    uint32(roundId),
 		Submission: types.Value{Key: *submission},
 	}, nil
 }

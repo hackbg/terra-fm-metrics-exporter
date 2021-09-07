@@ -17,6 +17,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/segmentio/kafka-go"
 	tmrpc "github.com/tendermint/tendermint/rpc/client/http"
+	ctypes "github.com/tendermint/tendermint/rpc/core/types"
 	tmTypes "github.com/tendermint/tendermint/types"
 )
 
@@ -26,12 +27,84 @@ const (
 
 var (
 	ChainId        string
+	Moniker        string
 	ConstLabels    map[string]string
 	RPC_ADDR       = os.Getenv("TERRA_RPC")
 	WS_URL         = os.Getenv("WS_URL")
 	TENDERMINT_RPC = os.Getenv("TENDERMINT_RPC")
 	KAFKA_SERVER   = os.Getenv("KAFKA_SERVER")
 	TOPIC          = os.Getenv("TOPIC")
+)
+
+var (
+	// Counters
+	fmAnswersTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flux_monitor_answers_total",
+			Help: "Reports the number of on-chain answers for a feed",
+		},
+		[]string{"contract_address"},
+	)
+	fmSubmissionsReceivedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flux_monitor_submissions_received_total",
+			Help: "Reports the current number of submissions",
+		},
+		[]string{"contract_address", "sender"},
+	)
+	fmRoundsCounter = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "flux_monitor_rounds",
+			Help: "The number of rounds the monitor has observed on a feed",
+		},
+		[]string{"contract_address"},
+	)
+	// Gauges
+	fmSubmissionReceivedValuesGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "flux_monitor_submission_received_values",
+			Help: "Reports the current submission value for an oracle on a feed",
+		},
+		[]string{"contract_address", "sender"},
+	)
+	nodeMetadataGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name:        "node_metadata",
+			Help:        "Exposes metdata for node",
+			ConstLabels: ConstLabels,
+		},
+		[]string{"chain_id", "network_name"},
+	)
+	feedContractMetadataGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "feed_contract_metadata",
+			Help: "Exposes metadata for individual feeds",
+		},
+		[]string{"chain_id", "contract_address", "contract_status", "contract_type", "feed_name", "feed_path", "network_id", "network_name", "symbol"},
+	)
+
+	fmAnswersGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "flux_monitor_answers",
+			Help: "Reports the current on chain price for a feed.",
+		},
+		[]string{"contract_address"},
+	)
+
+	fmCurrentHeadGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "head_tracker_current_head",
+			Help: "Tracks the current block height that the monitoring instance has processed",
+		},
+		[]string{"network_name", "chain_id"},
+	)
+	fmLatestRoundResponsesGauge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "flux_monitor_latest_round_responses",
+			Help: "Reports the current number of submissions received for the latest round for a feed",
+		},
+		[]string{"contract_address"},
+	)
 )
 
 var log = zerolog.New(zerolog.ConsoleWriter{Out: os.Stdout}).With().Timestamp().Logger()
@@ -44,126 +117,53 @@ func newKafkaWriter(kafkaUrl, topic string) *kafka.Writer {
 	}
 }
 
-type Feed struct {
-	ContractAddress string
-	ContractVersion int
-	DecimalPlaces   int
-	Heartbeat       int64
-	History         bool
-	Multiply        string
-	Name            string
-	Symbol          string
-	Pair            []string
-	Path            string
-	NodeCount       int
-	Status          string
-}
-
 type manager struct {
-	Feed
-	collector collector.Collector
-	writer    *kafka.Writer
+	Feed            types.Feed
+	latestRoundInfo types.LatestRoundInfo
+	collector       collector.Collector
+	writer          *kafka.Writer
 }
 
 func (m *manager) Stop() {
-	// TODO
+	// TODO:
 }
 
-func createManager(feed Feed) (*manager, error) {
-	fmt.Printf("Creating a feed with address: %s and name: %s", feed.ContractAddress, feed.Name)
-	collector, err := collector.NewCollector()
+func createManager(feed types.Feed, client tmrpc.HTTP) (*manager, error) {
+	fmt.Printf("Creating a feed with address: %s and name: %s\n", feed.ContractAddress, feed.Name)
+	collector, err := collector.NewCollector(client)
 	writer := newKafkaWriter(KAFKA_SERVER, TOPIC)
+	latestRoundInfo := types.LatestRoundInfo{RoundId: 0, Submissions: 0}
 
 	if err != nil {
 		return nil, err
 	}
 
 	return &manager{
-		Feed:      feed,
-		collector: *collector,
-		writer:    writer,
+		Feed:            feed,
+		collector:       *collector,
+		writer:          writer,
+		latestRoundInfo: latestRoundInfo,
 	}, nil
 }
 
-func (m *manager) subscribe() error {
+type message struct {
+	manager *manager
+	event   ctypes.ResultEvent
+}
+
+func subscribe(messages chan<- message, m *manager) {
 	subQuery := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", m.Feed.ContractAddress)
-	out, err := m.collector.Subscribe(context.Background(), "subscribe", subQuery)
 
-	handler := func(event types.EventRecords) {
-		for _, round := range event.NewRound {
-			res, err := json.Marshal(round)
-			if err != nil {
-				continue
-			}
-			fmt.Println(round)
-			err = m.writer.WriteMessages(context.Background(),
-				kafka.Message{
-					Key:   []byte("NewRound"),
-					Value: res,
-				},
-			)
-			if err != nil {
-				fmt.Println(err)
-			}
-			fmt.Println("WRITTEN TO NEW ROUND")
+	out, _ := m.collector.Subscribe(context.Background(), "subscribe", subQuery)
+
+	for {
+		resp, ok := <-out
+		if !ok {
+			return
 		}
-		for _, round := range event.SubmissionReceived {
-			fmt.Println(round)
-			res, err := json.Marshal(round)
-			if err != nil {
-				continue
-			}
-			err = m.writer.WriteMessages(context.Background(),
-				kafka.Message{
-					Key:   []byte("Submission Received"),
-					Value: res,
-				},
-			)
-			if err != nil {
-				fmt.Println(err)
-			}
-			fmt.Println("WRITTEN SUBMISSION")
-		}
-		for _, update := range event.AnswerUpdated {
-			fmt.Println(update)
-			res, err := json.Marshal(update)
-			if err != nil {
-				continue
-			}
-			err = m.writer.WriteMessages(context.Background(),
-				kafka.Message{
-					Key:   []byte("Answer Updated"),
-					Value: res,
-				},
-			)
-			if err != nil {
-				fmt.Println(err)
-			}
-			fmt.Println("WRITTEN SUBMISSION")
-		}
+		msg := message{manager: m, event: resp}
+		messages <- msg
 	}
-
-	go func() {
-		for {
-			resp, ok := <-out
-			if !ok {
-				return
-			}
-			info := collector.ExtractTxInfo(resp.Data.(tmTypes.EventDataTx))
-			if err != nil {
-				continue
-			}
-			eventRecords, err := collector.ParseEvents(resp.Data.(tmTypes.EventDataTx).Result.Events, info)
-			if err != nil {
-				continue
-			}
-			if eventRecords != nil {
-				handler(*eventRecords)
-			}
-		}
-	}()
-
-	return nil
 }
 
 // Terra responses
@@ -198,107 +198,32 @@ func StringToInt(s string) int {
 	return i
 }
 
-func setChainId() {
-	client, err := tmrpc.New(TENDERMINT_RPC, "/websocket")
-	if err != nil {
-		log.Fatal().Err(err).Msg("Could not create Tendermint client")
-	}
-
+func setChainId(client tmrpc.HTTP) {
 	status, err := client.Status(context.Background())
 	if err != nil {
 		log.Fatal().Err(err).Msg("Could not query Tendermint status")
 	}
-
 	log.Info().Str("network", status.NodeInfo.Network).Msg("Got network status from Tendermint")
 	ChainId = status.NodeInfo.Network
+	Moniker = status.NodeInfo.Moniker
+	fmt.Printf("chain: %s, moniker: %s\n", ChainId, Moniker)
+
 	ConstLabels = map[string]string{
 		"chain_id":      ChainId,
 		"contract_type": ContractType,
+		"network_name":  Moniker,
 	}
+
+	nodeMetadataGauge.With(prometheus.Labels{
+		"chain_id":     ChainId,
+		"network_name": Moniker,
+	}).Set(1)
 }
 
 func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers []manager) {
 	sublogger := log.With().
 		Str("request-id", uuid.New().String()).
 		Logger()
-
-	// Gauges
-	nodeMetadataGauge := prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Name:        "node_metadata",
-			Help:        "Exposes metdata for node",
-			ConstLabels: ConstLabels,
-		},
-	)
-
-	// TODO
-	feedContractMetadataGauge := prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "feed_contract_metadata",
-			Help: "Exposes metadata for individual feeds",
-		},
-		[]string{"chain_id", "contract_address", "contract_status", "contract_type", "feed_name", "feed_path", "network_id", "network_name", "symbol"},
-	)
-
-	fmAnswersGauge := prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "flux_monitor_answers",
-			Help: "Reports the current on chain price for a feed.",
-		},
-		[]string{"contract_address"},
-	)
-
-	fmCurrentHeadGauge := prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "head_tracker_current_head",
-			Help: "Tracks the current block height that the monitoring instance has processed",
-		},
-		[]string{"network_name", "chain_id", "network_id"},
-	)
-
-	// TODO
-	fmSubmissionReceivedValuesGauge := prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "flux_monitor_submission_received_values",
-			Help: "Reports the current submission value for an oracle on a feed",
-		},
-		[]string{"contract_address", "sender"},
-	)
-
-	// TODO: should be doable?
-	fmLatestRoundResponsesGauge := prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "flux_monitor_latest_round_responses",
-			Help: "Reports the current number of submissions received for the latest round for a feed",
-		},
-		[]string{"contract_address"},
-	)
-
-	fmAnswersTotal := prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "flux_monitor_answers_total",
-			Help: "Reports the number of on-chain answers for a feed",
-		},
-		[]string{"contract_address"},
-	)
-
-	// TODO, maybe not possible
-	fmSubmissionsReceivedTotal := prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "flux_monitor_submissions_received_total",
-			Help: "Reports the current number of submissions",
-		},
-		[]string{"contract_address", "sender"},
-	)
-
-	// Should be okay
-	fmRoundsCounter := prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "flux_monitor_rounds",
-			Help: "The number of rounds the monitor has observed on a feed",
-		},
-		[]string{},
-	)
 
 	// Register metrics
 	registry := prometheus.NewRegistry()
@@ -317,13 +242,10 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers []ma
 	go func() {
 		defer wg.Done()
 		sublogger.Debug().Msg("Querying the node information")
-		// TODO
 		height := collector.GetLatestBlockHeight(managers[0].collector)
 		fmCurrentHeadGauge.With(prometheus.Labels{
-			"chain_id": ChainId,
-			// TODO
-			"network_name": "",
-			"network_id":   "",
+			"chain_id":     ChainId,
+			"network_name": Moniker,
 		}).Set(float64(height))
 	}()
 	wg.Add(1)
@@ -352,9 +274,6 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers []ma
 				"contract_address": manager.Feed.ContractAddress,
 			}).Set(float64(StringToInt(res.Answer)))
 
-			fmAnswersTotal.With(prometheus.Labels{
-				"contract_address": manager.Feed.ContractAddress,
-			}).Add(float64(res.RoundId))
 		}
 	}()
 	wg.Add(1)
@@ -386,9 +305,10 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers []ma
 				"contract_type":    ContractType,
 				"feed_name":        manager.Feed.Name,
 				"feed_path":        manager.Feed.Path,
-				"network_id":       "",
-				"network_name":     "",
-				"symbol":           manager.Feed.Symbol,
+				"network_id":       ChainId,
+				// TODO: should that be moniker?
+				"network_name": Moniker,
+				"symbol":       manager.Feed.Symbol,
 			}).Set(1)
 		}
 	}()
@@ -399,8 +319,116 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers []ma
 	h.ServeHTTP(w, r)
 }
 
+func consume(out <-chan message) {
+	handler := func(event types.EventRecords, m *manager) {
+		for _, round := range event.NewRound {
+			res, err := json.Marshal(round)
+			if err != nil {
+				continue
+			}
+			err = m.writer.WriteMessages(context.Background(),
+				kafka.Message{
+					Key:   []byte("NewRound"),
+					Value: res,
+				},
+			)
+			if err != nil {
+				fmt.Println(err)
+			}
+
+			m.latestRoundInfo.RoundId = round.RoundId
+			m.latestRoundInfo.Submissions = 0
+
+			fmRoundsCounter.With(prometheus.Labels{
+				"contract_address": m.Feed.ContractAddress,
+			}).Inc()
+			fmLatestRoundResponsesGauge.With(prometheus.Labels{
+				"contract_address": m.Feed.ContractAddress,
+			}).Set(float64(m.latestRoundInfo.Submissions))
+		}
+		for _, round := range event.SubmissionReceived {
+			res, err := json.Marshal(round)
+			if err != nil {
+				continue
+			}
+			// write kafka message
+			err = m.writer.WriteMessages(context.Background(),
+				kafka.Message{
+					Key:   []byte("Submission Received"),
+					Value: res,
+				},
+			)
+			if err != nil {
+				log.Debug().Err(err).Msg("Could not send message to kafka")
+			}
+
+			if round.RoundId == m.latestRoundInfo.RoundId {
+				m.latestRoundInfo.Submissions += 1
+			}
+
+			// set counters and gauges
+			fmLatestRoundResponsesGauge.With(prometheus.Labels{
+				"contract_address": m.Feed.ContractAddress,
+			}).Set(float64(m.latestRoundInfo.Submissions))
+			fmSubmissionsReceivedTotal.With(prometheus.Labels{
+				"contract_address": m.Feed.ContractAddress,
+				"sender":           string(round.Sender),
+			}).Inc()
+			fmSubmissionReceivedValuesGauge.With(prometheus.Labels{
+				"contract_address": m.Feed.ContractAddress,
+				"sender":           string(round.Sender),
+			}).Set(float64(round.Submission.Key.Int64()))
+
+		}
+		for _, update := range event.AnswerUpdated {
+			res, err := json.Marshal(update)
+			if err != nil {
+				continue
+			}
+			err = m.writer.WriteMessages(context.Background(),
+				kafka.Message{
+					Key:   []byte("Answer Updated"),
+					Value: res,
+				},
+			)
+			if err != nil {
+				fmt.Println(err)
+			}
+			fmAnswersTotal.With(prometheus.Labels{
+				"contract_address": m.Feed.ContractAddress,
+			}).Inc()
+		}
+	}
+
+	go func() {
+		for {
+			resp, ok := <-out
+			if !ok {
+				return
+			}
+			info := collector.ExtractTxInfo(resp.event.Data.(tmTypes.EventDataTx))
+			eventRecords, err := collector.ParseEvents(resp.event.Data.(tmTypes.EventDataTx).Result.Events, info)
+			if err != nil {
+				continue
+			}
+			if eventRecords != nil {
+				handler(*eventRecords, resp.manager)
+			}
+		}
+	}()
+}
+
 func main() {
-	feed := Feed{
+	client, err := tmrpc.New(TENDERMINT_RPC, "/websocket")
+
+	if err != nil {
+		log.Fatal().Err(err).Msg("Could not create Tendermint Client")
+	}
+
+	setChainId(*client)
+
+	// TODO: should come from a URL
+	feed := types.Feed{
 		ContractAddress: "terra1tndcaqxkpc5ce9qee5ggqf430mr2z3pefe5wj6",
 		ContractVersion: 1,
 		DecimalPlaces:   8,
@@ -414,7 +442,7 @@ func main() {
 		NodeCount:       1,
 		Status:          "live",
 	}
-	feed1 := Feed{
+	feed1 := types.Feed{
 		ContractAddress: "terra1z449mpul3pwkdd3892gv28ewv5l06w7895wewm",
 		ContractVersion: 1,
 		DecimalPlaces:   8,
@@ -429,32 +457,23 @@ func main() {
 		Status:          "live",
 	}
 
-	feedManager, err := createManager(feed)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Could not create feed manager")
+	feeds := []types.Feed{feed, feed1}
+	managers := make([]manager, len(feeds))
+	msgs := make(chan message)
+
+	for i, feed := range feeds {
+		feedManager, err := createManager(feed, *client)
+		managers[i] = *feedManager
+		if err != nil {
+			log.Fatal().Err(err).Msg("Could not create feed manager")
+		}
+		go subscribe(msgs, feedManager)
 	}
-	defer feedManager.collector.TendermintClient.Stop()
 
-	err = feedManager.subscribe()
-
-	if err != nil {
-		log.Fatal().Err(err).Msg("Could not create feed manager")
-	}
-
-	feedManager1, err := createManager(feed1)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Could not create feed manager")
-	}
-	defer feedManager1.collector.TendermintClient.Stop()
-
-	err = feedManager1.subscribe()
-
-	if err != nil {
-		log.Fatal().Err(err).Msg("Could not create feed manager")
-	}
+	go consume(msgs)
 
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		TerraChainlinkHandler(w, r, []manager{*feedManager, *feedManager1})
+		TerraChainlinkHandler(w, r, managers)
 	})
 
 	err = http.ListenAndServe(":8089", nil)
