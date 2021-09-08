@@ -105,19 +105,20 @@ type TxInfo struct {
 	Height int64
 	Tx     string
 }
+
 type Feed struct {
-	ContractAddress string
-	ContractVersion int
-	DecimalPlaces   int
-	Heartbeat       int64
-	History         bool
-	Multiply        string
-	Name            string
-	Symbol          string
-	Pair            []string
-	Path            string
-	NodeCount       int
-	Status          string
+	ContractAddress string   `json:"contractAddress"`
+	ContractVersion int      `json:"contractVersion"`
+	DecimalPlaces   int      `json:"decimalPlaces"`
+	Heartbeat       int64    `json:"heartbeat"`
+	History         bool     `json:"history"`
+	Multiply        string   `json:"multiply"`
+	Name            string   `json:"name"`
+	Symbol          string   `json:"symbol"`
+	Pair            []string `json:"pair"`
+	Path            string   `json:"path"`
+	NodeCount       int      `json:"nodeCount"`
+	Status          string   `json:"status"`
 }
 
 type LatestRoundInfo struct {

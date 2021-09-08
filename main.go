@@ -8,6 +8,9 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
+
+	"github.com/google/go-cmp/cmp"
 
 	"github.com/google/uuid"
 	"github.com/hackbg/terra-chainlink-exporter/collector"
@@ -34,6 +37,7 @@ var (
 	TENDERMINT_RPC = os.Getenv("TENDERMINT_RPC")
 	KAFKA_SERVER   = os.Getenv("KAFKA_SERVER")
 	TOPIC          = os.Getenv("TOPIC")
+	CONFIG_URL     = os.Getenv("CONFIG_URL")
 )
 
 var (
@@ -220,7 +224,7 @@ func setChainId(client tmrpc.HTTP) {
 	}).Set(1)
 }
 
-func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers []manager) {
+func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers map[string]*manager) {
 	sublogger := log.With().
 		Str("request-id", uuid.New().String()).
 		Logger()
@@ -239,16 +243,17 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers []ma
 
 	var wg sync.WaitGroup
 
-	go func() {
-		defer wg.Done()
-		sublogger.Debug().Msg("Querying the node information")
-		height := collector.GetLatestBlockHeight(managers[0].collector)
-		fmCurrentHeadGauge.With(prometheus.Labels{
-			"chain_id":     ChainId,
-			"network_name": Moniker,
-		}).Set(float64(height))
-	}()
-	wg.Add(1)
+	// TODO:
+	// go func() {
+	// 	defer wg.Done()
+	// 	sublogger.Debug().Msg("Querying the node information")
+	// 	height := collector.GetLatestBlockHeight(managers[0].collector)
+	// 	fmCurrentHeadGauge.With(prometheus.Labels{
+	// 		"chain_id":     ChainId,
+	// 		"network_name": Moniker,
+	// 	}).Set(float64(height))
+	// }()
+	// wg.Add(1)
 
 	go func() {
 		defer wg.Done()
@@ -306,9 +311,8 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers []ma
 				"feed_name":        manager.Feed.Name,
 				"feed_path":        manager.Feed.Path,
 				"network_id":       ChainId,
-				// TODO: should that be moniker?
-				"network_name": Moniker,
-				"symbol":       manager.Feed.Symbol,
+				"network_name":     Moniker,
+				"symbol":           manager.Feed.Symbol,
 			}).Set(1)
 		}
 	}()
@@ -418,6 +422,40 @@ func consume(out <-chan message) {
 	}()
 }
 
+func getConfig() ([]types.Feed, error) {
+	var config []types.Feed
+	response, err := http.Get(CONFIG_URL)
+	if err != nil {
+		return nil, err
+	}
+
+	json.NewDecoder(response.Body).Decode(&config)
+	defer response.Body.Close()
+
+	if err != nil {
+		return nil, err
+	}
+
+	return config, nil
+}
+
+func poll(m map[string]*manager) {
+	ticker := time.NewTicker(3 * time.Second)
+	for range ticker.C {
+		data, err := getConfig()
+		if err != nil {
+			fmt.Println(err)
+		}
+
+		for _, feed := range data {
+			res := cmp.Equal(m[feed.ContractAddress].Feed, feed)
+			if !res {
+				m[feed.ContractAddress].Feed = feed
+			}
+		}
+	}
+}
+
 func main() {
 	client, err := tmrpc.New(TENDERMINT_RPC, "/websocket")
 
@@ -427,43 +465,20 @@ func main() {
 
 	setChainId(*client)
 
-	// TODO: should come from a URL
-	feed := types.Feed{
-		ContractAddress: "terra1tndcaqxkpc5ce9qee5ggqf430mr2z3pefe5wj6",
-		ContractVersion: 1,
-		DecimalPlaces:   8,
-		Heartbeat:       100,
-		History:         false,
-		Multiply:        "1000000",
-		Name:            "LINK / USD",
-		Symbol:          "$",
-		Pair:            []string{"LINK", "USD"},
-		Path:            "link_usd",
-		NodeCount:       1,
-		Status:          "live",
-	}
-	feed1 := types.Feed{
-		ContractAddress: "terra1z449mpul3pwkdd3892gv28ewv5l06w7895wewm",
-		ContractVersion: 1,
-		DecimalPlaces:   8,
-		Heartbeat:       100,
-		History:         false,
-		Multiply:        "1000000",
-		Name:            "LUNA / USD",
-		Symbol:          "$",
-		Pair:            []string{"LUNA", "USD"},
-		Path:            "luna_usd",
-		NodeCount:       1,
-		Status:          "live",
+	feeds, err := getConfig()
+
+	if err != nil {
+		log.Fatal().Err(err).Msg("Could not parse")
 	}
 
-	feeds := []types.Feed{feed, feed1}
-	managers := make([]manager, len(feeds))
 	msgs := make(chan message)
 
-	for i, feed := range feeds {
+	managers := make(map[string]*manager)
+
+	for _, feed := range feeds {
 		feedManager, err := createManager(feed, *client)
-		managers[i] = *feedManager
+		managers[feed.ContractAddress] = feedManager
+
 		if err != nil {
 			log.Fatal().Err(err).Msg("Could not create feed manager")
 		}
@@ -471,6 +486,7 @@ func main() {
 	}
 
 	go consume(msgs)
+	go poll(managers)
 
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		TerraChainlinkHandler(w, r, managers)

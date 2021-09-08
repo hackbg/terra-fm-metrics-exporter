@@ -33,6 +33,10 @@ func (c *Collector) Subscribe(ctx context.Context, method string, params string)
 	return c.TendermintClient.Subscribe(ctx, method, params)
 }
 
+func (c *Collector) Unsubscribe(ctx context.Context, method string, params string) error {
+	return c.TendermintClient.Unsubscribe(ctx, method, params)
+}
+
 func NewCollector(client tmrpc.HTTP) (*Collector, error) {
 
 	grpcConn, err := grpc.Dial(
