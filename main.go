@@ -224,7 +224,7 @@ func setChainId(client tmrpc.HTTP) {
 	}).Set(1)
 }
 
-func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers map[string]*manager) {
+func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers *Managers) {
 	sublogger := log.With().
 		Str("request-id", uuid.New().String()).
 		Logger()
@@ -242,6 +242,8 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers map[
 	registry.MustRegister(fmRoundsCounter)
 
 	var wg sync.WaitGroup
+	managers.mu.Lock()
+	defer managers.mu.Unlock()
 
 	// TODO:
 	// go func() {
@@ -259,7 +261,7 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers map[
 		defer wg.Done()
 		sublogger.Debug().Msg("Started querying aggregator answers")
 
-		for _, manager := range managers {
+		for _, manager := range managers.m {
 			response, err := manager.collector.GetLatestRoundData(manager.Feed.ContractAddress)
 
 			if err != nil {
@@ -287,7 +289,7 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers map[
 		defer wg.Done()
 		sublogger.Debug().Msg("Querying aggregators metadata")
 
-		for _, manager := range managers {
+		for _, manager := range managers.m {
 			response, err := manager.collector.GetAggregatorConfig(manager.Feed.ContractAddress)
 
 			if err != nil {
@@ -439,7 +441,7 @@ func getConfig() ([]types.Feed, error) {
 	return config, nil
 }
 
-func poll(m map[string]*manager) {
+func poll(managers *Managers) {
 	ticker := time.NewTicker(3 * time.Second)
 	for range ticker.C {
 		data, err := getConfig()
@@ -448,12 +450,19 @@ func poll(m map[string]*manager) {
 		}
 
 		for _, feed := range data {
-			res := cmp.Equal(m[feed.ContractAddress].Feed, feed)
+			managers.mu.Lock()
+			res := cmp.Equal(managers.m[feed.ContractAddress].Feed, feed)
 			if !res {
-				m[feed.ContractAddress].Feed = feed
+				managers.m[feed.ContractAddress].Feed = feed
 			}
+			managers.mu.Unlock()
 		}
 	}
+}
+
+type Managers struct {
+	mu sync.RWMutex
+	m  map[string]*manager
 }
 
 func main() {
@@ -474,22 +483,23 @@ func main() {
 	msgs := make(chan message)
 
 	managers := make(map[string]*manager)
+	sharedManagers := Managers{mu: sync.RWMutex{}, m: managers}
 
 	for _, feed := range feeds {
 		feedManager, err := createManager(feed, *client)
-		managers[feed.ContractAddress] = feedManager
+		sharedManagers.m[feed.ContractAddress] = feedManager
 
 		if err != nil {
 			log.Fatal().Err(err).Msg("Could not create feed manager")
 		}
-		go subscribe(msgs, feedManager)
+		go subscribe(msgs, sharedManagers.m[feed.ContractAddress])
 	}
 
 	go consume(msgs)
-	go poll(managers)
+	go poll(&sharedManagers)
 
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		TerraChainlinkHandler(w, r, managers)
+		TerraChainlinkHandler(w, r, &sharedManagers)
 	})
 
 	err = http.ListenAndServe(":8089", nil)
