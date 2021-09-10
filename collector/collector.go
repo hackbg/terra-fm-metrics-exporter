@@ -47,11 +47,6 @@ func NewCollector(client tmrpc.HTTP) (*Collector, error) {
 		log.Fatal().Err(err).Msg("Could not establish a grpc connection")
 	}
 
-	err = client.Start()
-	if err != nil {
-		fmt.Println(err)
-	}
-
 	return &Collector{
 		TendermintClient: &client,
 		WasmClient:       wasmTypes.NewQueryClient(grpcConn),

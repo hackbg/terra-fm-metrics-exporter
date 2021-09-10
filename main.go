@@ -155,7 +155,7 @@ type message struct {
 	event   ctypes.ResultEvent
 }
 
-func subscribe(messages chan<- message, m *manager) {
+func (m *manager) subscribe(messages chan<- message) {
 	subQuery := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", m.Feed.ContractAddress)
 
 	out, _ := m.collector.Subscribe(context.Background(), "subscribe", subQuery)
@@ -167,6 +167,15 @@ func subscribe(messages chan<- message, m *manager) {
 		}
 		msg := message{manager: m, event: resp}
 		messages <- msg
+	}
+}
+
+func (m *manager) unsubscribe() {
+	subQuery := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", m.Feed.ContractAddress)
+
+	err := m.collector.Unsubscribe(context.Background(), "unsubscribe", subQuery)
+	if err != nil {
+		fmt.Println(err)
 	}
 }
 
@@ -450,6 +459,7 @@ func poll(managers *Managers) {
 		}
 
 		for _, feed := range data {
+			// TODO: unsubscribe somewhere here if the feed is not live?
 			managers.mu.Lock()
 			res := cmp.Equal(managers.m[feed.ContractAddress].Feed, feed)
 			if !res {
@@ -474,6 +484,12 @@ func main() {
 
 	setChainId(*client)
 
+	err = client.Start()
+	if err != nil {
+		panic("Could not start the client")
+	}
+	defer client.Stop()
+
 	feeds, err := getConfig()
 
 	if err != nil {
@@ -492,7 +508,7 @@ func main() {
 		if err != nil {
 			log.Fatal().Err(err).Msg("Could not create feed manager")
 		}
-		go subscribe(msgs, sharedManagers.m[feed.ContractAddress])
+		go sharedManagers.m[feed.ContractAddress].subscribe(msgs)
 	}
 
 	go consume(msgs)
