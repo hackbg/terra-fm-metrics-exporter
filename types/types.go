@@ -57,6 +57,7 @@ type OptionAddr struct {
 type EventNewRound struct {
 	Height  int64  `json:"block_number"`
 	TxHash  string `json:"tx_hash"`
+	Feed    string `json:"contract_address"`
 	RoundId uint32 `json:"RoundId"`
 }
 
@@ -77,6 +78,7 @@ type EventAnswerUpdated struct {
 	Height  int64  `json:"block_number"`
 	TxHash  string `json:"tx_hash"`
 	Value   Value  `json:"current_answer"`
+	Feed    string `json:"contract_address"`
 	RoundId uint32 `json:"round_id"`
 }
 
@@ -84,6 +86,7 @@ type EventSubmissionReceived struct {
 	Height     int64  `json:"block_number"`
 	TxHash     string `json:"tx_hash"`
 	Submission Value  `json:"submission"`
+	Feed       string `json:"contract_address"`
 	RoundId    uint32 `json:"round_id"`
 	Sender     Addr   `json:"sender"`
 }

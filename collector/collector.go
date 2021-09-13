@@ -57,7 +57,7 @@ func NewCollector(client tmrpc.HTTP) (*Collector, error) {
 func GetLatestBlockHeight(c Collector) int64 {
 	status, err := c.TendermintClient.Status(context.Background())
 	if err != nil {
-		log.Fatal().Err(err).Msg("Could not query Tendermint status")
+		log.Error().Err(err).Msg("Could not query Tendermint status")
 	}
 
 	log.Info().Str("network", status.NodeInfo.Network).Msg("Got network status from Tendermint")
@@ -100,7 +100,7 @@ func ExtractTxInfo(data tmTypes.EventDataTx) types.TxInfo {
 	return txInfo
 }
 
-func ParseEvents(events []tmrTypes.Event, txInfo types.TxInfo) (*types.EventRecords, error) {
+func ParseEvents(events []tmrTypes.Event, txInfo types.TxInfo, feedAddr string) (*types.EventRecords, error) {
 	var eventRecords types.EventRecords
 	for _, event := range events {
 		switch event.Type {
@@ -108,6 +108,7 @@ func ParseEvents(events []tmrTypes.Event, txInfo types.TxInfo) (*types.EventReco
 			newRound, err := parseNewRoundEvent(event)
 			newRound.Height = txInfo.Height
 			newRound.TxHash = txInfo.Tx
+			newRound.Feed = feedAddr
 			if err != nil {
 				return nil, err
 			}
@@ -116,6 +117,7 @@ func ParseEvents(events []tmrTypes.Event, txInfo types.TxInfo) (*types.EventReco
 			submission, err := parseSubmissionReceivedEvent(event)
 			submission.Height = txInfo.Height
 			submission.TxHash = txInfo.Tx
+			submission.Feed = feedAddr
 			if err != nil {
 				return nil, err
 			}
@@ -124,6 +126,7 @@ func ParseEvents(events []tmrTypes.Event, txInfo types.TxInfo) (*types.EventReco
 			answerUpdated, err := parseAnswerUpdatedEvent(event)
 			answerUpdated.Height = txInfo.Height
 			answerUpdated.TxHash = txInfo.Tx
+			answerUpdated.Feed = feedAddr
 			if err != nil {
 				return nil, err
 			}

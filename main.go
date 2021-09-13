@@ -133,7 +133,7 @@ func (m *manager) Stop() {
 }
 
 func createManager(feed types.Feed, client tmrpc.HTTP) (*manager, error) {
-	fmt.Printf("Creating a feed with address: %s and name: %s\n", feed.ContractAddress, feed.Name)
+	log.Info().Msg(fmt.Sprintf("Creating a feed with address: %s and name: %s\n", feed.ContractAddress, feed.Name))
 	collector, err := collector.NewCollector(client)
 	writer := newKafkaWriter(KAFKA_SERVER, TOPIC)
 	latestRoundInfo := types.LatestRoundInfo{RoundId: 0, Submissions: 0}
@@ -175,7 +175,7 @@ func (m *manager) unsubscribe() {
 
 	err := m.collector.Unsubscribe(context.Background(), "unsubscribe", subQuery)
 	if err != nil {
-		fmt.Println(err)
+		log.Error().Err(err)
 	}
 }
 
@@ -219,7 +219,6 @@ func setChainId(client tmrpc.HTTP) {
 	log.Info().Str("network", status.NodeInfo.Network).Msg("Got network status from Tendermint")
 	ChainId = status.NodeInfo.Network
 	Moniker = status.NodeInfo.Moniker
-	fmt.Printf("chain: %s, moniker: %s\n", ChainId, Moniker)
 
 	ConstLabels = map[string]string{
 		"chain_id":      ChainId,
@@ -334,8 +333,10 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers *Man
 	h.ServeHTTP(w, r)
 }
 
-func consume(out <-chan message) {
+func consume(out <-chan message, managers *Managers) {
 	handler := func(event types.EventRecords, m *manager) {
+		managers.mu.Lock()
+		defer managers.mu.Unlock()
 		for _, round := range event.NewRound {
 			res, err := json.Marshal(round)
 			if err != nil {
@@ -348,7 +349,7 @@ func consume(out <-chan message) {
 				},
 			)
 			if err != nil {
-				fmt.Println(err)
+				log.Error().Err(err)
 			}
 
 			m.latestRoundInfo.RoundId = round.RoundId
@@ -374,7 +375,7 @@ func consume(out <-chan message) {
 				},
 			)
 			if err != nil {
-				log.Debug().Err(err).Msg("Could not send message to kafka")
+				log.Error().Err(err).Msg("Could not send message to kafka")
 			}
 
 			if round.RoundId == m.latestRoundInfo.RoundId {
@@ -407,7 +408,7 @@ func consume(out <-chan message) {
 				},
 			)
 			if err != nil {
-				fmt.Println(err)
+				log.Error().Err(err)
 			}
 			fmAnswersTotal.With(prometheus.Labels{
 				"contract_address": m.Feed.ContractAddress,
@@ -422,7 +423,13 @@ func consume(out <-chan message) {
 				return
 			}
 			info := collector.ExtractTxInfo(resp.event.Data.(tmTypes.EventDataTx))
-			eventRecords, err := collector.ParseEvents(resp.event.Data.(tmTypes.EventDataTx).Result.Events, info)
+			managers.mu.Lock()
+			eventRecords, err := collector.ParseEvents(
+				resp.event.Data.(tmTypes.EventDataTx).Result.Events,
+				info,
+				resp.manager.Feed.ContractAddress,
+			)
+			managers.mu.Unlock()
 			if err != nil {
 				continue
 			}
@@ -451,21 +458,36 @@ func getConfig() ([]types.Feed, error) {
 }
 
 func poll(managers *Managers) {
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	for range ticker.C {
 		data, err := getConfig()
 		if err != nil {
-			fmt.Println(err)
+			log.Error().Err(err)
+			continue
 		}
 
 		for _, feed := range data {
-			// TODO: unsubscribe somewhere here if the feed is not live?
-			managers.mu.Lock()
-			res := cmp.Equal(managers.m[feed.ContractAddress].Feed, feed)
-			if !res {
-				managers.m[feed.ContractAddress].Feed = feed
-			}
-			managers.mu.Unlock()
+			updateFeed(managers, feed)
+		}
+	}
+}
+
+func updateFeed(managers *Managers, feed types.Feed) {
+	managers.mu.Lock()
+	defer managers.mu.Unlock()
+	_, present := managers.m[feed.ContractAddress]
+
+	if !present {
+		managers.m[feed.ContractAddress].Feed = feed
+	}
+
+	res := cmp.Equal(managers.m[feed.ContractAddress].Feed, feed)
+
+	if !res {
+		managers.m[feed.ContractAddress].Feed = feed
+
+		if feed.Status != "live" {
+			managers.m[feed.ContractAddress].unsubscribe()
 		}
 	}
 }
@@ -493,7 +515,7 @@ func main() {
 	feeds, err := getConfig()
 
 	if err != nil {
-		log.Fatal().Err(err).Msg("Could not parse")
+		log.Error().Err(err).Msg("Could not parse feeds")
 	}
 
 	msgs := make(chan message)
@@ -506,12 +528,12 @@ func main() {
 		sharedManagers.m[feed.ContractAddress] = feedManager
 
 		if err != nil {
-			log.Fatal().Err(err).Msg("Could not create feed manager")
+			log.Error().Err(err).Msg("Could not create feed manager")
 		}
 		go sharedManagers.m[feed.ContractAddress].subscribe(msgs)
 	}
 
-	go consume(msgs)
+	go consume(msgs, &sharedManagers)
 	go poll(&sharedManagers)
 
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
