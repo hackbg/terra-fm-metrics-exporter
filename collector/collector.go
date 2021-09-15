@@ -71,9 +71,13 @@ func (c Collector) GetLatestRoundData(aggregatorAddress string) (*wasmTypes.Quer
 		context.Background(),
 		&wasmTypes.QueryContractStoreRequest{
 			ContractAddress: aggregatorAddress,
-			QueryMsg:        []byte(`{"get_latest_round_data": {}}`),
+			QueryMsg:        []byte(`{"aggregator_query": {"get_latest_round_data": {}}}`),
 		},
 	)
+
+	if err != nil {
+		log.Error().Err(err)
+	}
 
 	return response, err
 }
@@ -83,6 +87,28 @@ func (c Collector) GetAggregatorConfig(aggregatorAddress string) (*wasmTypes.Que
 		context.Background(),
 		&wasmTypes.QueryContractStoreRequest{
 			ContractAddress: aggregatorAddress,
+			QueryMsg:        []byte(`{"get_aggregator": {}}`),
+		},
+	)
+
+	if err != nil {
+		log.Error().Err(err)
+	}
+
+	bytes := []byte(response.QueryResult)
+
+	var addr string
+
+	err = json.Unmarshal(bytes, &addr)
+
+	if err != nil {
+		log.Error().Err(err)
+	}
+
+	response, err = c.WasmClient.ContractStore(
+		context.Background(),
+		&wasmTypes.QueryContractStoreRequest{
+			ContractAddress: addr,
 			QueryMsg:        []byte(`{"get_aggregator_config": {}}`),
 		},
 	)

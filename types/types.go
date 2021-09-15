@@ -91,11 +91,6 @@ type EventSubmissionReceived struct {
 	Sender     Addr   `json:"sender"`
 }
 
-type QueryResponse struct {
-	Height string
-	Result interface{}
-}
-
 type EventRecords struct {
 	NewRound                 []EventNewRound
 	RoundDetailsUpdated      []EventRoundDetailsUpdated

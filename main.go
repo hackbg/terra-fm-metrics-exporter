@@ -342,6 +342,7 @@ func consume(out <-chan message, managers *Managers) {
 			if err != nil {
 				continue
 			}
+			log.Debug().Msg(fmt.Sprintf("Got new round event: %q\n", res))
 			err = m.writer.WriteMessages(context.Background(),
 				kafka.Message{
 					Key:   []byte("NewRound"),
@@ -368,6 +369,7 @@ func consume(out <-chan message, managers *Managers) {
 				continue
 			}
 			// write kafka message
+			log.Debug().Msg(fmt.Sprintf("Got submission received event: %q\n", res))
 			err = m.writer.WriteMessages(context.Background(),
 				kafka.Message{
 					Key:   []byte("Submission Received"),
@@ -401,6 +403,7 @@ func consume(out <-chan message, managers *Managers) {
 			if err != nil {
 				continue
 			}
+			log.Debug().Msg(fmt.Sprintf("Got answer updated event: %q\n", res))
 			err = m.writer.WriteMessages(context.Background(),
 				kafka.Message{
 					Key:   []byte("Answer Updated"),
