@@ -93,19 +93,18 @@ func (c Collector) GetAggregatorConfig(aggregatorAddress string) (*wasmTypes.Que
 
 	if err != nil {
 		log.Error().Err(err)
+		return nil, err
 	}
-
-	bytes := []byte(response.QueryResult)
 
 	var addr string
 
-	err = json.Unmarshal(bytes, &addr)
+	err = json.Unmarshal(response.QueryResult, &addr)
 
 	if err != nil {
 		log.Error().Err(err)
 	}
 
-	response, err = c.WasmClient.ContractStore(
+	config, err := c.WasmClient.ContractStore(
 		context.Background(),
 		&wasmTypes.QueryContractStoreRequest{
 			ContractAddress: addr,
@@ -113,7 +112,7 @@ func (c Collector) GetAggregatorConfig(aggregatorAddress string) (*wasmTypes.Que
 		},
 	)
 
-	return response, err
+	return config, err
 }
 
 // Events
