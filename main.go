@@ -109,6 +109,13 @@ var (
 		},
 		[]string{"contract_address"},
 	)
+	fmRoundAge = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "flux_monitor_round_age",
+			Help: "Indicates how many blocks have been mined after a round started where no answer has been produced",
+		},
+		[]string{"contract_address"},
+	)
 )
 
 var log = zerolog.New(zerolog.ConsoleWriter{Out: os.Stdout}).With().Timestamp().Logger()
@@ -156,7 +163,12 @@ type message struct {
 }
 
 func (m *manager) subscribe(messages chan<- message) {
-	subQuery := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", m.Feed.ContractAddress)
+	addr, err := m.collector.GetAggregator(m.Feed.ContractAddress)
+	if err != nil {
+		log.Error().Err(err)
+		return
+	}
+	subQuery := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", *addr)
 
 	out, _ := m.collector.Subscribe(context.Background(), "subscribe", subQuery)
 

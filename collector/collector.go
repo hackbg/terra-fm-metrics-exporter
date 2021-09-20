@@ -115,6 +115,31 @@ func (c Collector) GetAggregatorConfig(aggregatorAddress string) (*wasmTypes.Que
 	return config, err
 }
 
+func (c Collector) GetAggregator(proxyAddress string) (address *string, err error) {
+	response, err := c.WasmClient.ContractStore(
+		context.Background(),
+		&wasmTypes.QueryContractStoreRequest{
+			ContractAddress: proxyAddress,
+			QueryMsg:        []byte(`{"get_aggregator": {}}`),
+		},
+	)
+
+	if err != nil {
+		log.Error().Err(err)
+		return nil, err
+	}
+
+	var addr string
+	err = json.Unmarshal(response.QueryResult, &addr)
+
+	if err != nil {
+		log.Error().Err(err)
+		return nil, err
+	}
+
+	return &addr, nil
+}
+
 // Events
 func ExtractTxInfo(data tmTypes.EventDataTx) types.TxInfo {
 	h := sha256.Sum256(data.Tx)
