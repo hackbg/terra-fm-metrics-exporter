@@ -188,10 +188,21 @@ func (m *manager) unsubscribeProxy() {
 		log.Error().Err(err)
 		return
 	}
+
+	// if the feed is not live there's no point keeing the aggregator's subscription
+	subQuery = fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", m.aggregator)
+	err = m.collector.Unsubscribe(context.Background(), "unsubscribe", subQuery)
+
+	if err != nil {
+		log.Error().Err(err)
+		return
+	}
 }
 
 func (m *manager) resubscribeAggregator(messages chan message) {
+	// skip if not set
 	if m.aggregator != "" {
+		fmt.Printf("Unsubscribing %s \n", m.aggregator)
 		subQuery := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", m.aggregator)
 
 		err := m.collector.Unsubscribe(context.Background(), "unsubscribe", subQuery)
@@ -201,6 +212,7 @@ func (m *manager) resubscribeAggregator(messages chan message) {
 
 	}
 
+	// get new aggregator address
 	addr, err := m.collector.GetAggregator(m.Feed.ContractAddress)
 
 	if err != nil {
@@ -208,7 +220,7 @@ func (m *manager) resubscribeAggregator(messages chan message) {
 		return
 	}
 
-	fmt.Printf("Unsubscribing %s, Subscribing: %s \n \n \n", m.aggregator, *addr)
+	fmt.Printf("Subscribing: %s \n", *addr)
 
 	m.aggregator = *addr
 	subQuery := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", *addr)
@@ -467,6 +479,7 @@ func consume(out chan message, managers *Managers) {
 		}
 		for range event.ConfirmAggregator {
 			log.Debug().Msg("Got confirm aggregator event \n")
+			// subscribe to the new aggregator's events
 			go m.resubscribeAggregator(out)
 		}
 	}
@@ -512,7 +525,7 @@ func getConfig() ([]types.Feed, error) {
 	return config, nil
 }
 
-func poll(managers *Managers) {
+func poll(managers *Managers, msgs chan message) {
 	ticker := time.NewTicker(5 * time.Second)
 	for range ticker.C {
 		data, err := getConfig()
@@ -522,27 +535,31 @@ func poll(managers *Managers) {
 		}
 
 		for _, feed := range data {
-			updateFeed(managers, feed)
+			updateFeed(managers, feed, msgs)
 		}
 	}
 }
 
-func updateFeed(managers *Managers, feed types.Feed) {
+func updateFeed(managers *Managers, feed types.Feed, msgs chan message) {
 	managers.mu.Lock()
 	defer managers.mu.Unlock()
 	_, present := managers.m[feed.ContractAddress]
 
+	// if the proxy is not present in the list of feeds, create a new feed and subscribe to events
 	if !present {
 		managers.m[feed.ContractAddress].Feed = feed
+		go managers.m[feed.ContractAddress].subscribeProxy(msgs)
+		go managers.m[feed.ContractAddress].resubscribeAggregator(msgs)
 	}
 
 	res := cmp.Equal(managers.m[feed.ContractAddress].Feed, feed)
 
+	// check if the feed parameters have changed
 	if !res {
 		managers.m[feed.ContractAddress].Feed = feed
 
 		if feed.Status != "live" {
-			managers.m[feed.ContractAddress].unsubscribeProxy()
+			go managers.m[feed.ContractAddress].unsubscribeProxy()
 		}
 	}
 }
@@ -580,17 +597,20 @@ func main() {
 
 	for _, feed := range feeds {
 		feedManager, err := createManager(feed, *client)
-		sharedManagers.m[feed.ContractAddress] = feedManager
 
 		if err != nil {
-			log.Error().Err(err).Msg("Could not create feed manager")
+			log.Error().Err(err)
+			continue
 		}
+		sharedManagers.m[feed.ContractAddress] = feedManager
+
 		go sharedManagers.m[feed.ContractAddress].subscribeProxy(msgs)
+		// subscribe in this case
 		go sharedManagers.m[feed.ContractAddress].resubscribeAggregator(msgs)
 	}
 
 	go consume(msgs, &sharedManagers)
-	go poll(&sharedManagers)
+	go poll(&sharedManagers, msgs)
 
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		TerraChainlinkHandler(w, r, &sharedManagers)
