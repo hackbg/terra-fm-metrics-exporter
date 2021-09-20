@@ -187,6 +187,13 @@ func ParseEvents(events []tmrTypes.Event, txInfo types.TxInfo, feedAddr string) 
 				return nil, err
 			}
 			eventRecords.OraclePermissionsUpdated = append(eventRecords.OraclePermissionsUpdated, permissionsUpdated...)
+		case "wasm-confirm_aggregator":
+			confirmAggregator, err := parseConfirmAggregatorEvent(event)
+			if err != nil {
+				return nil, err
+			}
+
+			eventRecords.ConfirmAggregator = append(eventRecords.ConfirmAggregator, *confirmAggregator)
 		}
 	}
 
@@ -279,6 +286,20 @@ func parseOraclePermissionsUpdatedEvent(event tmrTypes.Event) (events []types.Ev
 	}
 
 	return
+}
+
+func parseConfirmAggregatorEvent(event tmrTypes.Event) (*types.EventConfirmAggregator, error) {
+	attributes, err := getRequiredAttributes(event, []string{"contract_address"})
+
+	if err != nil {
+		return nil, err
+	}
+
+	var address string = attributes["contract_address"]
+
+	return &types.EventConfirmAggregator{
+		NewAggregator: address,
+	}, nil
 }
 
 func getAttributeValue(event tmrTypes.Event, attributeKey string) (string, error) {

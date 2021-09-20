@@ -91,12 +91,17 @@ type EventSubmissionReceived struct {
 	Sender     Addr   `json:"sender"`
 }
 
+type EventConfirmAggregator struct {
+	NewAggregator string `json:"contract_address"`
+}
+
 type EventRecords struct {
 	NewRound                 []EventNewRound
 	RoundDetailsUpdated      []EventRoundDetailsUpdated
 	OraclePermissionsUpdated []EventOraclePermissionsUpdated
 	AnswerUpdated            []EventAnswerUpdated
 	SubmissionReceived       []EventSubmissionReceived
+	ConfirmAggregator        []EventConfirmAggregator
 }
 
 type TxInfo struct {

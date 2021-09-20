@@ -130,6 +130,7 @@ func newKafkaWriter(kafkaUrl, topic string) *kafka.Writer {
 
 type manager struct {
 	Feed            types.Feed
+	aggregator      string
 	latestRoundInfo types.LatestRoundInfo
 	collector       collector.Collector
 	writer          *kafka.Writer
@@ -154,6 +155,7 @@ func createManager(feed types.Feed, client tmrpc.HTTP) (*manager, error) {
 		collector:       *collector,
 		writer:          writer,
 		latestRoundInfo: latestRoundInfo,
+		aggregator:      "",
 	}, nil
 }
 
@@ -162,13 +164,8 @@ type message struct {
 	event   ctypes.ResultEvent
 }
 
-func (m *manager) subscribe(messages chan<- message) {
-	addr, err := m.collector.GetAggregator(m.Feed.ContractAddress)
-	if err != nil {
-		log.Error().Err(err)
-		return
-	}
-	subQuery := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", *addr)
+func (m *manager) subscribeProxy(messages chan<- message) {
+	subQuery := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", m.Feed.ContractAddress)
 
 	out, _ := m.collector.Subscribe(context.Background(), "subscribe", subQuery)
 
@@ -182,13 +179,51 @@ func (m *manager) subscribe(messages chan<- message) {
 	}
 }
 
-func (m *manager) unsubscribe() {
+func (m *manager) unsubscribeProxy() {
 	subQuery := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", m.Feed.ContractAddress)
 
 	err := m.collector.Unsubscribe(context.Background(), "unsubscribe", subQuery)
+
 	if err != nil {
 		log.Error().Err(err)
+		return
 	}
+}
+
+func (m *manager) resubscribeAggregator(messages chan message) {
+	if m.aggregator != "" {
+		subQuery := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", m.aggregator)
+
+		err := m.collector.Unsubscribe(context.Background(), "unsubscribe", subQuery)
+		if err != nil {
+			log.Error().Err(err)
+		}
+
+	}
+
+	addr, err := m.collector.GetAggregator(m.Feed.ContractAddress)
+
+	if err != nil {
+		log.Error().Err(err)
+		return
+	}
+
+	fmt.Printf("Unsubscribing %s, Subscribing: %s \n \n \n", m.aggregator, *addr)
+
+	m.aggregator = *addr
+	subQuery := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", *addr)
+
+	out, _ := m.collector.Subscribe(context.Background(), "subscribe", subQuery)
+
+	for {
+		resp, ok := <-out
+		if !ok {
+			return
+		}
+		msg := message{manager: m, event: resp}
+		messages <- msg
+	}
+
 }
 
 // Terra responses
@@ -260,6 +295,7 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers *Man
 	registry.MustRegister(fmSubmissionReceivedValuesGauge)
 	registry.MustRegister(fmSubmissionsReceivedTotal)
 	registry.MustRegister(fmRoundsCounter)
+	registry.MustRegister(fmRoundAge)
 
 	var wg sync.WaitGroup
 	managers.mu.Lock()
@@ -345,7 +381,7 @@ func TerraChainlinkHandler(w http.ResponseWriter, r *http.Request, managers *Man
 	h.ServeHTTP(w, r)
 }
 
-func consume(out <-chan message, managers *Managers) {
+func consume(out chan message, managers *Managers) {
 	handler := func(event types.EventRecords, m *manager) {
 		managers.mu.Lock()
 		defer managers.mu.Unlock()
@@ -429,6 +465,10 @@ func consume(out <-chan message, managers *Managers) {
 				"contract_address": m.Feed.ContractAddress,
 			}).Inc()
 		}
+		for range event.ConfirmAggregator {
+			log.Debug().Msg("Got confirm aggregator event \n")
+			go m.resubscribeAggregator(out)
+		}
 	}
 
 	go func() {
@@ -502,7 +542,7 @@ func updateFeed(managers *Managers, feed types.Feed) {
 		managers.m[feed.ContractAddress].Feed = feed
 
 		if feed.Status != "live" {
-			managers.m[feed.ContractAddress].unsubscribe()
+			managers.m[feed.ContractAddress].unsubscribeProxy()
 		}
 	}
 }
@@ -545,7 +585,8 @@ func main() {
 		if err != nil {
 			log.Error().Err(err).Msg("Could not create feed manager")
 		}
-		go sharedManagers.m[feed.ContractAddress].subscribe(msgs)
+		go sharedManagers.m[feed.ContractAddress].subscribeProxy(msgs)
+		go sharedManagers.m[feed.ContractAddress].resubscribeAggregator(msgs)
 	}
 
 	go consume(msgs, &sharedManagers)
