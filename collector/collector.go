@@ -20,8 +20,7 @@ import (
 )
 
 var (
-	RPC_ADDR       = os.Getenv("TERRA_RPC")
-	TENDERMINT_RPC = os.Getenv("TENDERMINT_RPC")
+	RPC_ADDR = os.Getenv("TERRA_RPC")
 )
 
 type Collector struct {

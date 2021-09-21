@@ -33,8 +33,7 @@ var (
 	Moniker        string
 	ConstLabels    map[string]string
 	RPC_ADDR       = os.Getenv("TERRA_RPC")
-	WS_URL         = os.Getenv("WS_URL")
-	TENDERMINT_RPC = os.Getenv("TENDERMINT_RPC")
+	TENDERMINT_URL = os.Getenv("TENDERMINT_URL")
 	KAFKA_SERVER   = os.Getenv("KAFKA_SERVER")
 	TOPIC          = os.Getenv("TOPIC")
 	CONFIG_URL     = os.Getenv("CONFIG_URL")
@@ -525,7 +524,7 @@ func getConfig() ([]types.Feed, error) {
 	return config, nil
 }
 
-func poll(managers *Managers, msgs chan message) {
+func poll(managers *Managers, msgs chan message, client *tmrpc.HTTP) {
 	ticker := time.NewTicker(5 * time.Second)
 	for range ticker.C {
 		data, err := getConfig()
@@ -535,19 +534,24 @@ func poll(managers *Managers, msgs chan message) {
 		}
 
 		for _, feed := range data {
-			updateFeed(managers, feed, msgs)
+			updateFeed(managers, feed, msgs, client)
 		}
 	}
 }
 
-func updateFeed(managers *Managers, feed types.Feed, msgs chan message) {
+func updateFeed(managers *Managers, feed types.Feed, msgs chan message, client *tmrpc.HTTP) {
 	managers.mu.Lock()
 	defer managers.mu.Unlock()
 	_, present := managers.m[feed.ContractAddress]
 
 	// if the proxy is not present in the list of feeds, create a new feed and subscribe to events
 	if !present {
-		managers.m[feed.ContractAddress].Feed = feed
+		manager, err := createManager(feed, *client)
+		if err != nil {
+			log.Error().Err(err)
+			return
+		}
+		managers.m[feed.ContractAddress] = manager
 		go managers.m[feed.ContractAddress].subscribeProxy(msgs)
 		go managers.m[feed.ContractAddress].resubscribeAggregator(msgs)
 	}
@@ -570,7 +574,7 @@ type Managers struct {
 }
 
 func main() {
-	client, err := tmrpc.New(TENDERMINT_RPC, "/websocket")
+	client, err := tmrpc.New(fmt.Sprintf("http://%s", TENDERMINT_URL), "/websocket")
 
 	if err != nil {
 		log.Fatal().Err(err).Msg("Could not create Tendermint Client")
@@ -603,14 +607,13 @@ func main() {
 			continue
 		}
 		sharedManagers.m[feed.ContractAddress] = feedManager
-
 		go sharedManagers.m[feed.ContractAddress].subscribeProxy(msgs)
 		// subscribe in this case
 		go sharedManagers.m[feed.ContractAddress].resubscribeAggregator(msgs)
 	}
 
 	go consume(msgs, &sharedManagers)
-	go poll(&sharedManagers, msgs)
+	go poll(&sharedManagers, msgs, client)
 
 	http.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		TerraChainlinkHandler(w, r, &sharedManagers)
