@@ -2,6 +2,8 @@ package types
 
 import (
 	"math/big"
+
+	ctypes "github.com/tendermint/tendermint/rpc/core/types"
 )
 
 type Value struct {
@@ -72,6 +74,11 @@ type EventRoundDetailsUpdated struct {
 type EventOraclePermissionsUpdated struct {
 	Oracle Addr
 	Bool   bool
+}
+
+type Message struct {
+	Event   ctypes.ResultEvent
+	Address string
 }
 
 type EventAnswerUpdated struct {

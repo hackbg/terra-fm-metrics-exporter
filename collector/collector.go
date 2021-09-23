@@ -1,145 +1,17 @@
 package collector
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"math/big"
-	"os"
 	"strconv"
 
 	"github.com/hackbg/terra-chainlink-exporter/types"
-	"github.com/rs/zerolog/log"
 	tmrTypes "github.com/tendermint/tendermint/abci/types"
-	tmrpc "github.com/tendermint/tendermint/rpc/client/http"
-	ctypes "github.com/tendermint/tendermint/rpc/core/types"
 	tmTypes "github.com/tendermint/tendermint/types"
-	wasmTypes "github.com/terra-money/core/x/wasm/types"
-	"google.golang.org/grpc"
 )
 
-var (
-	RPC_ADDR = os.Getenv("TERRA_RPC")
-)
-
-type Collector struct {
-	TendermintClient *tmrpc.HTTP
-	WasmClient       wasmTypes.QueryClient
-}
-
-func (c *Collector) Subscribe(ctx context.Context, method string, params string) (out <-chan ctypes.ResultEvent, err error) {
-	return c.TendermintClient.Subscribe(ctx, method, params)
-}
-
-func (c *Collector) Unsubscribe(ctx context.Context, method string, params string) error {
-	return c.TendermintClient.Unsubscribe(ctx, method, params)
-}
-
-func NewCollector(client tmrpc.HTTP) (*Collector, error) {
-
-	grpcConn, err := grpc.Dial(
-		RPC_ADDR,
-		grpc.WithInsecure(),
-	)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Could not establish a grpc connection")
-	}
-
-	return &Collector{
-		TendermintClient: &client,
-		WasmClient:       wasmTypes.NewQueryClient(grpcConn),
-	}, nil
-}
-
-// Queries
-func GetLatestBlockHeight(c Collector) int64 {
-	status, err := c.TendermintClient.Status(context.Background())
-	if err != nil {
-		log.Error().Err(err).Msg("Could not query Tendermint status")
-	}
-
-	log.Info().Str("network", status.NodeInfo.Network).Msg("Got network status from Tendermint")
-
-	latestHeight := status.SyncInfo.LatestBlockHeight
-	return latestHeight
-}
-
-func (c Collector) GetLatestRoundData(aggregatorAddress string) (*wasmTypes.QueryContractStoreResponse, error) {
-	response, err := c.WasmClient.ContractStore(
-		context.Background(),
-		&wasmTypes.QueryContractStoreRequest{
-			ContractAddress: aggregatorAddress,
-			QueryMsg:        []byte(`{"aggregator_query": {"get_latest_round_data": {}}}`),
-		},
-	)
-
-	if err != nil {
-		log.Error().Err(err)
-	}
-
-	return response, err
-}
-
-func (c Collector) GetAggregatorConfig(aggregatorAddress string) (*wasmTypes.QueryContractStoreResponse, error) {
-	response, err := c.WasmClient.ContractStore(
-		context.Background(),
-		&wasmTypes.QueryContractStoreRequest{
-			ContractAddress: aggregatorAddress,
-			QueryMsg:        []byte(`{"get_aggregator": {}}`),
-		},
-	)
-
-	if err != nil {
-		log.Error().Err(err)
-		return nil, err
-	}
-
-	var addr string
-
-	err = json.Unmarshal(response.QueryResult, &addr)
-
-	if err != nil {
-		log.Error().Err(err)
-	}
-
-	config, err := c.WasmClient.ContractStore(
-		context.Background(),
-		&wasmTypes.QueryContractStoreRequest{
-			ContractAddress: addr,
-			QueryMsg:        []byte(`{"get_aggregator_config": {}}`),
-		},
-	)
-
-	return config, err
-}
-
-func (c Collector) GetAggregator(proxyAddress string) (address *string, err error) {
-	response, err := c.WasmClient.ContractStore(
-		context.Background(),
-		&wasmTypes.QueryContractStoreRequest{
-			ContractAddress: proxyAddress,
-			QueryMsg:        []byte(`{"get_aggregator": {}}`),
-		},
-	)
-
-	if err != nil {
-		log.Error().Err(err)
-		return nil, err
-	}
-
-	var addr string
-	err = json.Unmarshal(response.QueryResult, &addr)
-
-	if err != nil {
-		log.Error().Err(err)
-		return nil, err
-	}
-
-	return &addr, nil
-}
-
-// Events
 func ExtractTxInfo(data tmTypes.EventDataTx) types.TxInfo {
 	h := sha256.Sum256(data.Tx)
 	var txInfo = types.TxInfo{
