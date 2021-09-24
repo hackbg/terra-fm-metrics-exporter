@@ -129,6 +129,7 @@ type Feed struct {
 	Path            string   `json:"path"`
 	NodeCount       int      `json:"nodeCount"`
 	Status          string   `json:"status"`
+	Aggregator      string   `json:"aggregator:omitempty"`
 }
 
 type LatestRoundInfo struct {

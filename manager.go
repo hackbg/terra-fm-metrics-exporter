@@ -13,7 +13,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/hackbg/terra-chainlink-exporter/types"
 	tmrpc "github.com/tendermint/tendermint/rpc/client/http"
-	ctypes "github.com/tendermint/tendermint/rpc/core/types"
 	wasmTypes "github.com/terra-money/core/x/wasm/types"
 	"google.golang.org/grpc"
 )
@@ -78,12 +77,31 @@ func NewManager(tendermint_url, terra_rpc string) (*FeedManager, error) {
 	}, nil
 }
 
-func (fm *FeedManager) subscribe(address string) (out <-chan ctypes.ResultEvent, err error) {
+func (fm *FeedManager) subscribe(address string, msgs chan types.Message, logger log.Logger) (err error) {
+	level.Info(logger).Log("msg", "Subscribing to feed", "address", address)
 	query := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", address)
-	return fm.TendermintClient.Subscribe(context.Background(), "subscribe", query)
+	out, err := fm.TendermintClient.Subscribe(context.Background(), "subscribe", query)
+
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		for {
+			resp, ok := <-out
+			if !ok {
+				return
+			}
+			msg := types.Message{Event: resp, Address: address}
+			msgs <- msg
+		}
+	}()
+
+	return nil
 }
 
-func (fm *FeedManager) unsubscribe(address string) error {
+func (fm *FeedManager) unsubscribe(address string, logger log.Logger) error {
+	level.Info(logger).Log("msg", "Unsubscribing from feed", "address", address)
 	query := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", address)
 	return fm.TendermintClient.Unsubscribe(context.Background(), "unsubscribe", query)
 }
@@ -108,63 +126,116 @@ func (fm *FeedManager) initializeFeeds(ch chan types.Message, logger log.Logger)
 		if err != nil {
 			return err
 		}
-		go func() {
-			level.Info(logger).Log("msg", "Subscribing to address", "address", aggregatorAddress)
-			out, err := fm.subscribe(aggregatorAddress)
 
-			if err != nil {
-				level.Error(logger).Log("msg", "Can't parse aggregator address", "err", err)
-			}
+		// update the feed
+		feed.Aggregator = aggregatorAddress
+		fm.Feeds[feed.ContractAddress] = feed
 
-			for {
-				resp, ok := <-out
-				if !ok {
-					return
-				}
-				msg := types.Message{Event: resp, Address: aggregatorAddress}
-				ch <- msg
-			}
-		}()
+		err = fm.subscribe(aggregatorAddress, ch, logger)
+
+		if err != nil {
+			level.Error(logger).Log("msg", "Can't subscribe to address", "err", err)
+			return err
+		}
+
 	}
 	return nil
 }
 
-func (fm *FeedManager) poll(msgs chan types.Message, mu *sync.Mutex) {
+func (fm *FeedManager) poll(msgs chan types.Message, mu *sync.Mutex, logger log.Logger) {
 	var newFeeds = make(map[string]types.Feed)
 	ticker := time.NewTicker(5 * time.Second)
+
 	for range ticker.C {
-
 		err := getConfig(newFeeds)
-
 		if err != nil {
 			continue
 		}
-
 		for _, feed := range newFeeds {
 			mu.Lock()
-			fm.updateFeed(feed, msgs)
+			fm.updateFeed(feed, msgs, logger)
 			mu.Unlock()
 		}
 	}
 }
 
-func (fm *FeedManager) updateFeed(feed types.Feed, msgs chan types.Message) {
+func (fm *FeedManager) updateFeed(feed types.Feed, msgs chan types.Message, logger log.Logger) {
 	_, present := fm.Feeds[feed.ContractAddress]
-
 	// if the proxy is not present in the list of feeds, create a new feed and subscribe to events
 	if !present {
+		//fm.Feeds[feed.ContractAddress] = feed
+		aggregator, err := fm.WasmClient.ContractStore(
+			context.Background(),
+			&wasmTypes.QueryContractStoreRequest{
+				ContractAddress: feed.ContractAddress,
+				QueryMsg:        []byte(`{"get_aggregator": {}}`),
+			},
+		)
+
+		if err != nil {
+			return
+		}
+
+		var aggregatorAddress string
+		err = json.Unmarshal(aggregator.QueryResult, &aggregatorAddress)
+
+		if err != nil {
+			return
+		}
+
+		// Add new feed
+		feed.Aggregator = aggregatorAddress
 		fm.Feeds[feed.ContractAddress] = feed
-		// TODO: sub / unsub
+
+		err = fm.subscribe(aggregatorAddress, msgs, logger)
+		if err != nil {
+			level.Error(logger).Log("msg", "Could not subscribe to feed", "err", err)
+			return
+		}
 	}
 
+	// Check if aggregator address has changed
+	aggregator, err := fm.WasmClient.ContractStore(
+		context.Background(),
+		&wasmTypes.QueryContractStoreRequest{
+			ContractAddress: feed.ContractAddress,
+			QueryMsg:        []byte(`{"get_aggregator": {}}`),
+		},
+	)
+
+	if err != nil {
+		return
+	}
+
+	var aggregatorAddress string
+	err = json.Unmarshal(aggregator.QueryResult, &aggregatorAddress)
+
+	if err != nil {
+		return
+	}
+	changed := fm.Feeds[feed.ContractAddress].Aggregator != aggregatorAddress
+	feed.Aggregator = aggregatorAddress
+
+	// Check if any of feed configurations have changed
 	res := cmp.Equal(fm.Feeds[feed.ContractAddress], feed)
 
-	// check if the feed parameters have changed
+	// if either changed we need to update and resubscribe
 	if !res {
+		level.Info(logger).Log("msg", "Feed configuration has changed", "changed", res)
+	}
+	// if aggregator changed resub
+	if changed {
+		err = fm.unsubscribe(fm.Feeds[feed.ContractAddress].Aggregator, logger)
+		if err != nil {
+			level.Error(logger).Log("msg", "Could not unsubscribe from feed", "err", err)
+			return
+		}
 		fm.Feeds[feed.ContractAddress] = feed
+		err = fm.subscribe(aggregatorAddress, msgs, logger)
 
-		// if feed.Status != "live" {
-		// 	// TODO: unsub proxy??
-		// }
+		if err != nil {
+			level.Error(logger).Log("msg", "Could not resubscribe to feed", "err", err)
+			return
+		}
 	}
 }

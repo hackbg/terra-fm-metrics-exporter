@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"sync"
 
 	"github.com/go-kit/kit/log"
@@ -228,7 +227,6 @@ func (e *Exporter) CollectRoundMetrics(ch chan<- prometheus.Metric) bool {
 
 func (e *Exporter) CollectSubmissionMetrics(ch chan<- prometheus.Metric) bool {
 	for _, submission := range e.submissionEvents {
-		fmt.Printf("Submission: %+v\n", submission)
 		e.submissionsCounter.With(prometheus.Labels{
 			"contract_address": submission.Feed,
 			"sender":           string(submission.Sender),
@@ -402,9 +400,7 @@ func (e *Exporter) consume(out chan types.Message) {
 			level.Info(e.logger).Log("msg", "Got New Round event: ", "round", round.RoundId, "Feed", round.Feed)
 
 			e.roundsEvents = append(e.roundsEvents, round)
-			// e.roundsCounter.With(prometheus.Labels{
-			// 	"contract_address": round.Feed,
-			// }).Inc()
+
 			e.mutex.Unlock()
 
 			// fmLatestRoundResponsesGauge.With(prometheus.Labels{
@@ -435,15 +431,7 @@ func (e *Exporter) consume(out chan types.Message) {
 			level.Info(e.logger).Log("msg", "Got Subbmission Received event", "round id", round.RoundId, "submission", round.Submission.Key.Int64())
 
 			e.submissionEvents = append(e.submissionEvents, round)
-			// e.submissionsGauge.With(prometheus.Labels{
-			// 	"contract_address": round.Feed,
-			// 	"sender":           string(round.Sender),
-			// }).Set(float64(round.Submission.Key.Int64()))
 
-			// e.submissionsCounter.With(prometheus.Labels{
-			// 	"contract_address": round.Feed,
-			// 	"sender":           string(round.Sender),
-			// }).Inc()
 			e.mutex.Unlock()
 		}
 		for _, update := range event.AnswerUpdated {
@@ -468,9 +456,7 @@ func (e *Exporter) consume(out chan types.Message) {
 			}
 			level.Info(e.logger).Log("msg", "Got Answer Updated event", "round", update.RoundId, "Answer", update.Value.Key.Int64())
 			e.answersEvents = append(e.answersEvents, update)
-			// e.answersCounter.With(prometheus.Labels{
-			// 	"contract_address": update.Feed,
-			// }).Inc()
+
 			e.mutex.Unlock()
 		}
 		// for range event.ConfirmAggregator {
@@ -502,5 +488,5 @@ func (e *Exporter) consume(out chan types.Message) {
 }
 
 func (e *Exporter) pollChanges() {
-	go e.feedManager.poll(e.msgCh, &e.mutex)
+	go e.feedManager.poll(e.msgCh, &e.mutex, e.logger)
 }
