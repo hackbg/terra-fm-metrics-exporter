@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 
 	"github.com/go-kit/kit/log"
@@ -147,6 +148,10 @@ type Exporter struct {
 	currentHeadGauge        *prometheus.GaugeVec
 	latetRoundResponseGauge *prometheus.GaugeVec
 	roundAgeGauge           *prometheus.GaugeVec
+
+	roundsEvents     []types.EventNewRound
+	submissionEvents []types.EventSubmissionReceived
+	answersEvents    []types.EventAnswerUpdated
 }
 
 func NewExporter(fm FeedManager, l log.Logger, ch chan types.Message, kafka *kafka.Writer) *Exporter {
@@ -171,6 +176,10 @@ func NewExporter(fm FeedManager, l log.Logger, ch chan types.Message, kafka *kaf
 		currentHeadGauge:        fmCurrentHeadGauge,
 		latetRoundResponseGauge: fmLatestRoundResponsesGauge,
 		roundAgeGauge:           fmRoundAge,
+
+		roundsEvents:     []types.EventNewRound{},
+		submissionEvents: []types.EventSubmissionReceived{},
+		answersEvents:    []types.EventAnswerUpdated{},
 	}
 
 	e.feedManager.initializeFeeds(e.msgCh, e.logger)
@@ -196,8 +205,57 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	e.CollectLatestRoundData(ch)
 	e.CollectLatestBlockHeight(ch)
 	e.CollectAggregatorConfig(ch)
+	e.CollectRoundMetrics(ch)
+	e.CollectSubmissionMetrics(ch)
+	e.CollectAnswerMetrics(ch)
 
 	e.mutex.Unlock()
+}
+
+func (e *Exporter) CollectRoundMetrics(ch chan<- prometheus.Metric) bool {
+	// aggregate the metrics
+	for _, round := range e.roundsEvents {
+		e.roundsCounter.With(prometheus.Labels{
+			"contract_address": round.Feed,
+		}).Inc()
+		e.answersCounter.Collect(ch)
+	}
+	// reset
+	e.roundsEvents = nil
+
+	return true
+}
+
+func (e *Exporter) CollectSubmissionMetrics(ch chan<- prometheus.Metric) bool {
+	for _, submission := range e.submissionEvents {
+		fmt.Printf("Submission: %+v\n", submission)
+		e.submissionsCounter.With(prometheus.Labels{
+			"contract_address": submission.Feed,
+			"sender":           string(submission.Sender),
+		}).Inc()
+		e.submissionsCounter.Collect(ch)
+
+		e.submissionsGauge.With(prometheus.Labels{
+			"contract_address": submission.Feed,
+			"sender":           string(submission.Sender),
+		}).Set(float64(submission.Submission.Key.Int64()))
+		e.submissionsGauge.Collect(ch)
+	}
+	e.submissionEvents = nil
+
+	return true
+}
+
+func (e *Exporter) CollectAnswerMetrics(ch chan<- prometheus.Metric) bool {
+	for _, answer := range e.answersEvents {
+		e.answersCounter.With(prometheus.Labels{
+			"contract_address": answer.Feed,
+		}).Inc()
+		e.answersCounter.Collect(ch)
+	}
+	e.answersEvents = nil
+
+	return true
 }
 
 func (e *Exporter) CollectLatestRoundData(ch chan<- prometheus.Metric) bool {
@@ -343,9 +401,10 @@ func (e *Exporter) consume(out chan types.Message) {
 
 			level.Info(e.logger).Log("msg", "Got New Round event: ", "round", round.RoundId, "Feed", round.Feed)
 
-			e.roundsCounter.With(prometheus.Labels{
-				"contract_address": round.Feed,
-			}).Inc()
+			e.roundsEvents = append(e.roundsEvents, round)
+			// e.roundsCounter.With(prometheus.Labels{
+			// 	"contract_address": round.Feed,
+			// }).Inc()
 			e.mutex.Unlock()
 
 			// fmLatestRoundResponsesGauge.With(prometheus.Labels{
@@ -375,15 +434,16 @@ func (e *Exporter) consume(out chan types.Message) {
 
 			level.Info(e.logger).Log("msg", "Got Subbmission Received event", "round id", round.RoundId, "submission", round.Submission.Key.Int64())
 
-			e.submissionsGauge.With(prometheus.Labels{
-				"contract_address": round.Feed,
-				"sender":           string(round.Sender),
-			}).Set(float64(round.Submission.Key.Int64()))
+			e.submissionEvents = append(e.submissionEvents, round)
+			// e.submissionsGauge.With(prometheus.Labels{
+			// 	"contract_address": round.Feed,
+			// 	"sender":           string(round.Sender),
+			// }).Set(float64(round.Submission.Key.Int64()))
 
-			e.submissionsCounter.With(prometheus.Labels{
-				"contract_address": round.Feed,
-				"sender":           string(round.Sender),
-			}).Inc()
+			// e.submissionsCounter.With(prometheus.Labels{
+			// 	"contract_address": round.Feed,
+			// 	"sender":           string(round.Sender),
+			// }).Inc()
 			e.mutex.Unlock()
 		}
 		for _, update := range event.AnswerUpdated {
@@ -407,9 +467,10 @@ func (e *Exporter) consume(out chan types.Message) {
 				continue
 			}
 			level.Info(e.logger).Log("msg", "Got Answer Updated event", "round", update.RoundId, "Answer", update.Value.Key.Int64())
-			e.answersCounter.With(prometheus.Labels{
-				"contract_address": update.Feed,
-			}).Inc()
+			e.answersEvents = append(e.answersEvents, update)
+			// e.answersCounter.With(prometheus.Labels{
+			// 	"contract_address": update.Feed,
+			// }).Inc()
 			e.mutex.Unlock()
 		}
 		// for range event.ConfirmAggregator {
