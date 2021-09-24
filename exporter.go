@@ -314,31 +314,17 @@ func (e *Exporter) CollectAggregatorConfig(ch chan<- prometheus.Metric) bool {
 		return false
 	}
 	for _, feed := range e.feedManager.Feeds {
-		aggregator, err := e.feedManager.WasmClient.ContractStore(
-			context.Background(),
-			&wasmTypes.QueryContractStoreRequest{
-				ContractAddress: feed.ContractAddress,
-				QueryMsg:        []byte(`{"get_aggregator": {}}`),
-			},
-		)
+		aggregator, err := e.feedManager.getAggregator(feed.ContractAddress)
 
 		if err != nil {
-			level.Error(e.logger).Log("msg", "Can't query proxy aggregator", "err", err)
-			return false
-		}
-
-		var aggregatorAddress string
-		err = json.Unmarshal(aggregator.QueryResult, &aggregatorAddress)
-
-		if err != nil {
-			level.Error(e.logger).Log("msg", "Can't parse aggregator address", "err", err)
+			level.Error(e.logger).Log("msg", "Could not get the aggregator address", "err", err)
 			return false
 		}
 
 		config, err := e.feedManager.WasmClient.ContractStore(
 			context.Background(),
 			&wasmTypes.QueryContractStoreRequest{
-				ContractAddress: aggregatorAddress,
+				ContractAddress: *aggregator,
 				QueryMsg:        []byte(`{"get_aggregator_config": {}}`),
 			},
 		)
@@ -358,7 +344,7 @@ func (e *Exporter) CollectAggregatorConfig(ch chan<- prometheus.Metric) bool {
 
 		e.contractMetadataGauge.WithLabelValues(
 			status.NodeInfo.Network,
-			aggregatorAddress,
+			*aggregator,
 			feed.Status,
 			ContractType,
 			feed.Name,
@@ -397,7 +383,7 @@ func (e *Exporter) consume(out chan types.Message) {
 				continue
 			}
 
-			level.Info(e.logger).Log("msg", "Got New Round event: ", "round", round.RoundId, "Feed", round.Feed)
+			level.Info(e.logger).Log("msg", "Got New Round event", "round", round.RoundId, "Feed", round.Feed)
 
 			e.roundsEvents = append(e.roundsEvents, round)
 
@@ -428,7 +414,7 @@ func (e *Exporter) consume(out chan types.Message) {
 				continue
 			}
 
-			level.Info(e.logger).Log("msg", "Got Subbmission Received event", "round id", round.RoundId, "submission", round.Submission.Key.Int64())
+			level.Info(e.logger).Log("msg", "Got Submission Received event", "round id", round.RoundId, "submission", round.Submission.Key.Int64())
 
 			e.submissionEvents = append(e.submissionEvents, round)
 
