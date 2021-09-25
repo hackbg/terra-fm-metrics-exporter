@@ -11,6 +11,7 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/hackbg/terra-chainlink-exporter/types"
 	tmrpc "github.com/tendermint/tendermint/rpc/client/http"
 	wasmTypes "github.com/terra-money/core/x/wasm/types"
@@ -170,16 +171,14 @@ func (fm *FeedManager) poll(msgs chan types.Message, mu *sync.Mutex, logger log.
 
 func (fm *FeedManager) updateFeed(feed types.Feed, msgs chan types.Message, logger log.Logger) {
 	_, present := fm.Feeds[feed.ContractAddress]
+	aggregator, err := fm.getAggregator(feed.ContractAddress)
+
+	if err != nil {
+		level.Error(logger).Log("msg", "Could not get the aggregator address", "err", err)
+		return
+	}
 	// if the proxy is not present in the list of feeds, create a new feed and subscribe to events
 	if !present {
-		//fm.Feeds[feed.ContractAddress] = feed
-		aggregator, err := fm.getAggregator(feed.ContractAddress)
-
-		if err != nil {
-			level.Error(logger).Log("msg", "Could not get the aggregator address", "err", err)
-			return
-		}
-
 		// Add new feed
 		feed.Aggregator = *aggregator
 		fm.Feeds[feed.ContractAddress] = feed
@@ -191,41 +190,13 @@ func (fm *FeedManager) updateFeed(feed types.Feed, msgs chan types.Message, logg
 		}
 	}
 
-	// Check if aggregator address has changed
-	aggregator, err := fm.getAggregator(feed.ContractAddress)
-
-	if err != nil {
-		level.Error(logger).Log("msg", "Could not get the aggregator address", "err", err)
-		return
-	}
-
-	changed := fm.Feeds[feed.ContractAddress].Aggregator != *aggregator
-	feed.Aggregator = *aggregator
-
-	// Check if any of feed configurations have changed
-	res := cmp.Equal(fm.Feeds[feed.ContractAddress], feed)
+	// Check if any of feed configurations have changed ignoring the Aggregator field
+	res := cmp.Equal(fm.Feeds[feed.ContractAddress], feed, cmpopts.IgnoreFields(feed, "Aggregator"))
 
 	// if either changed we need to update and resubscribe
 	if !res {
 		level.Info(logger).Log("msg", "Feed configuration has changed")
+		feed.Aggregator = *aggregator
 		fm.Feeds[feed.ContractAddress] = feed
-	}
-	// if aggregator changed resub
-	if changed {
-		// Unsubscribe, we should not be listening to events from prev aggregator
-		err = fm.unsubscribe(fm.Feeds[feed.ContractAddress].Aggregator, logger)
-		if err != nil {
-			level.Error(logger).Log("msg", "Could not unsubscribe from feed", "err", err)
-			return
-		}
-
-		// Subscribe, listen to new aggregator events
-		fm.Feeds[feed.ContractAddress] = feed
-		err = fm.subscribe(*aggregator, msgs, logger)
-
-		if err != nil {
-			level.Error(logger).Log("msg", "Could not resubscribe to feed", "err", err)
-			return
-		}
 	}
 }

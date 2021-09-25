@@ -99,6 +99,7 @@ type EventSubmissionReceived struct {
 }
 
 type EventConfirmAggregator struct {
+	Feed          string `json:"feed:omitempty"`
 	NewAggregator string `json:"contract_address"`
 }
 

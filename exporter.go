@@ -153,7 +153,7 @@ type Exporter struct {
 	answersEvents    []types.EventAnswerUpdated
 }
 
-func NewExporter(fm FeedManager, l log.Logger, ch chan types.Message, kafka *kafka.Writer) *Exporter {
+func NewExporter(fm FeedManager, l log.Logger, ch chan types.Message, kafka *kafka.Writer) (*Exporter, error) {
 	e := Exporter{
 		feedManager: fm,
 		logger:      l,
@@ -181,11 +181,15 @@ func NewExporter(fm FeedManager, l log.Logger, ch chan types.Message, kafka *kaf
 		answersEvents:    []types.EventAnswerUpdated{},
 	}
 
-	e.feedManager.initializeFeeds(e.msgCh, e.logger)
+	err := e.feedManager.initializeFeeds(e.msgCh, e.logger)
+	if err != nil {
+		level.Error(l).Log("msg", "Could not initialize feeds", "err", err)
+		return nil, err
+	}
 	e.pollChanges()
 	e.consume(e.msgCh)
 
-	return &e
+	return &e, nil
 }
 
 // Describe describes all the metrics ever exporter (not including ones that should read from ws) by the Terra Chainlink exporter.
@@ -314,17 +318,10 @@ func (e *Exporter) CollectAggregatorConfig(ch chan<- prometheus.Metric) bool {
 		return false
 	}
 	for _, feed := range e.feedManager.Feeds {
-		aggregator, err := e.feedManager.getAggregator(feed.ContractAddress)
-
-		if err != nil {
-			level.Error(e.logger).Log("msg", "Could not get the aggregator address", "err", err)
-			return false
-		}
-
 		config, err := e.feedManager.WasmClient.ContractStore(
 			context.Background(),
 			&wasmTypes.QueryContractStoreRequest{
-				ContractAddress: *aggregator,
+				ContractAddress: feed.Aggregator,
 				QueryMsg:        []byte(`{"get_aggregator_config": {}}`),
 			},
 		)
@@ -344,7 +341,7 @@ func (e *Exporter) CollectAggregatorConfig(ch chan<- prometheus.Metric) bool {
 
 		e.contractMetadataGauge.WithLabelValues(
 			status.NodeInfo.Network,
-			*aggregator,
+			feed.Aggregator,
 			feed.Status,
 			ContractType,
 			feed.Name,
@@ -445,10 +442,32 @@ func (e *Exporter) consume(out chan types.Message) {
 
 			e.mutex.Unlock()
 		}
-		// for range event.ConfirmAggregator {
-		// 	// subscribe to the new aggregator's events
-		// 	go m.resubscribeAggregator(out)
-		// }
+		for _, confirm := range event.ConfirmAggregator {
+			// This event indicates that the aggregator address for a feed has changed
+			// So we need to unsubscribe from old aggregator's events
+			e.mutex.Lock()
+			err := e.feedManager.unsubscribe(e.feedManager.Feeds[confirm.Feed].Aggregator, e.logger)
+			if err != nil {
+				level.Error(e.logger).Log("msg", "Could not unsubscribe old aggregator", "err", err)
+				e.mutex.Unlock()
+				continue
+			}
+
+			// Update the feed's aggregator
+			feed := e.feedManager.Feeds[confirm.Feed]
+			feed.Aggregator = confirm.NewAggregator
+			e.feedManager.Feeds[confirm.Feed] = feed
+
+			// And subscribe to new aggregator's events
+			err = e.feedManager.subscribe(confirm.NewAggregator, e.msgCh, e.logger)
+			if err != nil {
+				level.Error(e.logger).Log("msg", "Could not unsubscribe old aggregator", "err", err)
+				e.mutex.Unlock()
+				continue
+			}
+
+			e.mutex.Unlock()
+		}
 	}
 
 	go func() {

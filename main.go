@@ -63,8 +63,11 @@ func main() {
 
 	// Initialize the exporter
 	kafkaWriter := newKafkaWriter(KAFKA_SERVER, TOPIC)
-	exporter := NewExporter(*feedManager, logger, msgs, kafkaWriter)
-
+	exporter, err := NewExporter(*feedManager, logger, msgs, kafkaWriter)
+	if err != nil {
+		level.Error(logger).Log("msg", "Could not create exporter", "err", err)
+		return
+	}
 	// Register the exporter
 	prometheus.MustRegister(exporter)
 
