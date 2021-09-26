@@ -46,7 +46,7 @@ func getConfig(feeds map[string]types.Feed) error {
 }
 
 func NewManager(tendermint_url, terra_rpc string) (*FeedManager, error) {
-	var feeds = make(map[string]types.Feed)
+	feeds := make(map[string]types.Feed)
 	grpcConn, err := grpc.Dial(
 		terra_rpc,
 		grpc.WithInsecure(),
@@ -153,7 +153,7 @@ func (fm *FeedManager) initializeFeeds(ch chan types.Message, logger log.Logger)
 }
 
 func (fm *FeedManager) poll(msgs chan types.Message, mu *sync.Mutex, logger log.Logger) {
-	var newFeeds = make(map[string]types.Feed)
+	newFeeds := make(map[string]types.Feed)
 	ticker := time.NewTicker(5 * time.Second)
 
 	for range ticker.C {

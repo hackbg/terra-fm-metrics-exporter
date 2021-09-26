@@ -15,29 +15,6 @@ import (
 	wasmTypes "github.com/terra-money/core/x/wasm/types"
 )
 
-type (
-	AggregatorConfigResponse struct {
-		Link               string `json:"link,omitempty"`
-		Validator          string `json:"validator,omitempty"`
-		PaymentAmount      string `json:"payment_amount,omitempty"`
-		MaxSubmissionCount int    `json:"max_submission_count,omitempty"`
-		MinSubmissionCount int    `json:"min_submission_count,omitempty"`
-		RestartDelay       int    `json:"restart_delay,omitempty"`
-		Timeout            int    `json:"timeout,omitempty"`
-		Decimals           int    `json:"decimal,omitempty"`
-		Description        string `json:"description,omitempty"`
-		MinSubmissionValue string `json:"min_submission_value,omitempty"`
-		MaxSubmissionValue string `json:"max_submission_value,omitempty"`
-	}
-	LatestRoundResponse struct {
-		RoundId         int    `json:"round_id"`
-		Answer          string `json:"answer"`
-		StartedAt       int    `json:"started_at"`
-		UpdatedAt       int    `json:"updated_at"`
-		AnsweredInRound int    `json:"answered_in_round"`
-	}
-)
-
 func newKafkaWriter(kafkaURL, topic string) *kafka.Writer {
 	return &kafka.Writer{
 		Addr:     kafka.TCP(kafkaURL),
@@ -48,7 +25,6 @@ func newKafkaWriter(kafkaURL, topic string) *kafka.Writer {
 
 var (
 	// Counters
-	// DONE
 	fmAnswersTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "flux_monitor_answers_total",
@@ -56,7 +32,6 @@ var (
 		},
 		[]string{"contract_address"},
 	)
-	// DONE
 	fmSubmissionsReceivedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "flux_monitor_submissions_received_total",
@@ -64,7 +39,6 @@ var (
 		},
 		[]string{"contract_address", "sender"},
 	)
-	// DONE
 	fmRoundsCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "flux_monitor_rounds",
@@ -73,7 +47,6 @@ var (
 		[]string{"contract_address"},
 	)
 	// Gauges
-	// DONE
 	fmSubmissionReceivedValuesGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "flux_monitor_submission_received_values",
@@ -88,7 +61,6 @@ var (
 		},
 		[]string{"chain_id", "network_name", "oracle", "sender"},
 	)
-	// DONE
 	feedContractMetadataGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "feed_contract_metadata",
@@ -96,7 +68,6 @@ var (
 		},
 		[]string{"chain_id", "contract_address", "contract_status", "contract_type", "feed_name", "feed_path", "network_id", "network_name", "symbol"},
 	)
-	// DONE
 	fmAnswersGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "flux_monitor_answers",
@@ -104,7 +75,6 @@ var (
 		},
 		[]string{"contract_address"},
 	)
-	// DONE
 	fmCurrentHeadGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "head_tracker_current_head",
@@ -187,7 +157,7 @@ func NewExporter(fm FeedManager, l log.Logger, ch chan types.Message, kafka *kaf
 		return nil, err
 	}
 	e.pollChanges()
-	e.consume(e.msgCh)
+	e.storeEvents(e.msgCh)
 
 	return &e, nil
 }
@@ -205,17 +175,17 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	e.mutex.Lock()
 
-	e.CollectLatestRoundData(ch)
-	e.CollectLatestBlockHeight(ch)
-	e.CollectAggregatorConfig(ch)
-	e.CollectRoundMetrics(ch)
-	e.CollectSubmissionMetrics(ch)
-	e.CollectAnswerMetrics(ch)
+	e.collectLatestRoundData(ch)
+	e.collectLatestBlockHeight(ch)
+	e.collectAggregatorConfig(ch)
+	e.collectRoundMetrics(ch)
+	e.collectSubmissionMetrics(ch)
+	e.collectAnswerMetrics(ch)
 
 	e.mutex.Unlock()
 }
 
-func (e *Exporter) CollectRoundMetrics(ch chan<- prometheus.Metric) bool {
+func (e *Exporter) collectRoundMetrics(ch chan<- prometheus.Metric) bool {
 	// aggregate the metrics
 	for _, round := range e.roundsEvents {
 		e.roundsCounter.With(prometheus.Labels{
@@ -229,7 +199,7 @@ func (e *Exporter) CollectRoundMetrics(ch chan<- prometheus.Metric) bool {
 	return true
 }
 
-func (e *Exporter) CollectSubmissionMetrics(ch chan<- prometheus.Metric) bool {
+func (e *Exporter) collectSubmissionMetrics(ch chan<- prometheus.Metric) bool {
 	for _, submission := range e.submissionEvents {
 		e.submissionsCounter.With(prometheus.Labels{
 			"contract_address": submission.Feed,
@@ -248,7 +218,7 @@ func (e *Exporter) CollectSubmissionMetrics(ch chan<- prometheus.Metric) bool {
 	return true
 }
 
-func (e *Exporter) CollectAnswerMetrics(ch chan<- prometheus.Metric) bool {
+func (e *Exporter) collectAnswerMetrics(ch chan<- prometheus.Metric) bool {
 	for _, answer := range e.answersEvents {
 		e.answersCounter.With(prometheus.Labels{
 			"contract_address": answer.Feed,
@@ -260,7 +230,7 @@ func (e *Exporter) CollectAnswerMetrics(ch chan<- prometheus.Metric) bool {
 	return true
 }
 
-func (e *Exporter) CollectLatestRoundData(ch chan<- prometheus.Metric) bool {
+func (e *Exporter) collectLatestRoundData(ch chan<- prometheus.Metric) bool {
 	for _, feed := range e.feedManager.Feeds {
 		response, err := e.feedManager.WasmClient.ContractStore(
 			context.Background(),
@@ -275,7 +245,7 @@ func (e *Exporter) CollectLatestRoundData(ch chan<- prometheus.Metric) bool {
 			return false
 		}
 
-		var res LatestRoundResponse
+		var res types.LatestRoundResponse
 		err = json.Unmarshal(response.QueryResult, &res)
 
 		if err != nil {
@@ -290,7 +260,7 @@ func (e *Exporter) CollectLatestRoundData(ch chan<- prometheus.Metric) bool {
 	return true
 }
 
-func (e *Exporter) CollectLatestBlockHeight(ch chan<- prometheus.Metric) bool {
+func (e *Exporter) collectLatestBlockHeight(ch chan<- prometheus.Metric) bool {
 	status, err := e.feedManager.TendermintClient.Status(context.Background())
 	if err != nil {
 		level.Error(e.logger).Log("msg", "Can't get the latest block height", "err", err)
@@ -311,7 +281,7 @@ func (e *Exporter) CollectLatestBlockHeight(ch chan<- prometheus.Metric) bool {
 	return true
 }
 
-func (e *Exporter) CollectAggregatorConfig(ch chan<- prometheus.Metric) bool {
+func (e *Exporter) collectAggregatorConfig(ch chan<- prometheus.Metric) bool {
 	status, err := e.feedManager.TendermintClient.Status(context.Background())
 	if err != nil {
 		level.Error(e.logger).Log("msg", "Can't get the latest block height", "err", err)
@@ -331,7 +301,7 @@ func (e *Exporter) CollectAggregatorConfig(ch chan<- prometheus.Metric) bool {
 			return false
 		}
 
-		var agggregatorConfig AggregatorConfigResponse
+		var agggregatorConfig types.AggregatorConfigResponse
 		err = json.Unmarshal(config.QueryResult, &agggregatorConfig)
 
 		if err != nil {
@@ -357,117 +327,89 @@ func (e *Exporter) CollectAggregatorConfig(ch chan<- prometheus.Metric) bool {
 	return true
 }
 
-func (e *Exporter) consume(out chan types.Message) {
+func (e *Exporter) storeEvents(out chan types.Message) {
 	handler := func(event types.EventRecords) {
+		e.mutex.Lock()
 		for _, round := range event.NewRound {
 			res, err := json.Marshal(round)
-
 			if err != nil {
 				level.Error(e.logger).Log("msg", "Could not parse message", "err", err)
 				continue
 			}
-
-			e.mutex.Lock()
 			err = e.kafkaWriter.WriteMessages(context.Background(),
 				kafka.Message{
 					Key:   []byte("NewRound"),
 					Value: res,
 				},
 			)
-
 			if err != nil {
 				level.Error(e.logger).Log("msg", "Could not write kafka message", "err", err)
 				continue
 			}
-
 			level.Info(e.logger).Log("msg", "Got New Round event", "round", round.RoundId, "Feed", round.Feed)
-
 			e.roundsEvents = append(e.roundsEvents, round)
-
-			e.mutex.Unlock()
-
 			// fmLatestRoundResponsesGauge.With(prometheus.Labels{
 			// 	"contract_address": m.Feed.ContractAddress,
 			// }).Set(float64(m.latestRoundInfo.Submissions))
 		}
 		for _, round := range event.SubmissionReceived {
 			res, err := json.Marshal(round)
-
 			if err != nil {
 				level.Error(e.logger).Log("msg", "Could not parse message", "err", err)
 				continue
 			}
-
-			e.mutex.Lock()
 			err = e.kafkaWriter.WriteMessages(context.Background(),
 				kafka.Message{
-					Key:   []byte("NewRound"),
+					Key:   []byte("SubmissionReceived"),
 					Value: res,
 				},
 			)
-
 			if err != nil {
 				level.Error(e.logger).Log("msg", "Could not write kafka message", "err", err)
 				continue
 			}
-
 			level.Info(e.logger).Log("msg", "Got Submission Received event", "round id", round.RoundId, "submission", round.Submission.Key.Int64())
-
 			e.submissionEvents = append(e.submissionEvents, round)
-
-			e.mutex.Unlock()
 		}
 		for _, update := range event.AnswerUpdated {
 			res, err := json.Marshal(update)
-
 			if err != nil {
 				level.Error(e.logger).Log("msg", "Could not parse message", "err", err)
 				continue
 			}
-
-			e.mutex.Lock()
 			err = e.kafkaWriter.WriteMessages(context.Background(),
 				kafka.Message{
-					Key:   []byte("NewRound"),
+					Key:   []byte("AnswerUpdated"),
 					Value: res,
 				},
 			)
-
 			if err != nil {
 				level.Error(e.logger).Log("msg", "Could not write kafka message", "err", err)
 				continue
 			}
 			level.Info(e.logger).Log("msg", "Got Answer Updated event", "round", update.RoundId, "Answer", update.Value.Key.Int64())
 			e.answersEvents = append(e.answersEvents, update)
-
-			e.mutex.Unlock()
 		}
 		for _, confirm := range event.ConfirmAggregator {
 			// This event indicates that the aggregator address for a feed has changed
 			// So we need to unsubscribe from old aggregator's events
-			e.mutex.Lock()
 			err := e.feedManager.unsubscribe(e.feedManager.Feeds[confirm.Feed].Aggregator, e.logger)
 			if err != nil {
 				level.Error(e.logger).Log("msg", "Could not unsubscribe old aggregator", "err", err)
-				e.mutex.Unlock()
 				continue
 			}
-
 			// Update the feed's aggregator
 			feed := e.feedManager.Feeds[confirm.Feed]
 			feed.Aggregator = confirm.NewAggregator
 			e.feedManager.Feeds[confirm.Feed] = feed
-
 			// And subscribe to new aggregator's events
 			err = e.feedManager.subscribe(confirm.NewAggregator, e.msgCh, e.logger)
 			if err != nil {
 				level.Error(e.logger).Log("msg", "Could not unsubscribe old aggregator", "err", err)
-				e.mutex.Unlock()
 				continue
 			}
-
-			e.mutex.Unlock()
 		}
+		e.mutex.Unlock()
 	}
 
 	go func() {

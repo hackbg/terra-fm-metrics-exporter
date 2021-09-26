@@ -137,3 +137,25 @@ type LatestRoundInfo struct {
 	RoundId     uint32 `json:"round_id"`
 	Submissions uint32 `json:"submissions"`
 }
+
+// Responses
+type AggregatorConfigResponse struct {
+	Link               string `json:"link,omitempty"`
+	Validator          string `json:"validator,omitempty"`
+	PaymentAmount      string `json:"payment_amount,omitempty"`
+	MaxSubmissionCount int    `json:"max_submission_count,omitempty"`
+	MinSubmissionCount int    `json:"min_submission_count,omitempty"`
+	RestartDelay       int    `json:"restart_delay,omitempty"`
+	Timeout            int    `json:"timeout,omitempty"`
+	Decimals           int    `json:"decimal,omitempty"`
+	Description        string `json:"description,omitempty"`
+	MinSubmissionValue string `json:"min_submission_value,omitempty"`
+	MaxSubmissionValue string `json:"max_submission_value,omitempty"`
+}
+type LatestRoundResponse struct {
+	RoundId         int    `json:"round_id"`
+	Answer          string `json:"answer"`
+	StartedAt       int    `json:"started_at"`
+	UpdatedAt       int    `json:"updated_at"`
+	AnsweredInRound int    `json:"answered_in_round"`
+}

@@ -14,7 +14,7 @@ import (
 
 func ExtractTxInfo(data tmTypes.EventDataTx) types.TxInfo {
 	h := sha256.Sum256(data.Tx)
-	var txInfo = types.TxInfo{
+	txInfo := types.TxInfo{
 		Height: data.Height,
 		Tx:     fmt.Sprintf("%x", h[:]),
 	}
@@ -166,7 +166,7 @@ func parseConfirmAggregatorEvent(event tmrTypes.Event) (*types.EventConfirmAggre
 		return nil, err
 	}
 
-	var address string = attributes["contract_address"]
+	address := attributes["contract_address"]
 
 	return &types.EventConfirmAggregator{
 		NewAggregator: address,
