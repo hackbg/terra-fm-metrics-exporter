@@ -1,10 +1,11 @@
-package main
+package manager
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -17,6 +18,8 @@ import (
 	wasmTypes "github.com/terra-money/core/x/wasm/types"
 	"google.golang.org/grpc"
 )
+
+var CONFIG_URL = os.Getenv("CONFIG_URL")
 
 type FeedManager struct {
 	WasmClient       wasmTypes.QueryClient
@@ -55,7 +58,7 @@ func NewManager(tendermint_url, terra_rpc string) (*FeedManager, error) {
 		return nil, err
 	}
 
-	client, err := tmrpc.New(fmt.Sprintf("http://%s", TENDERMINT_URL), "/websocket")
+	client, err := tmrpc.New(fmt.Sprintf("http://%s", tendermint_url), "/websocket")
 
 	if err != nil {
 		return nil, err
@@ -78,7 +81,7 @@ func NewManager(tendermint_url, terra_rpc string) (*FeedManager, error) {
 	}, nil
 }
 
-func (fm *FeedManager) subscribe(address string, msgs chan types.Message, logger log.Logger) (err error) {
+func (fm *FeedManager) Subscribe(address string, msgs chan types.Message, logger log.Logger) (err error) {
 	level.Info(logger).Log("msg", "Subscribing to feed", "address", address)
 	query := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", address)
 	out, err := fm.TendermintClient.Subscribe(context.Background(), "subscribe", query)
@@ -101,7 +104,7 @@ func (fm *FeedManager) subscribe(address string, msgs chan types.Message, logger
 	return nil
 }
 
-func (fm *FeedManager) unsubscribe(address string, logger log.Logger) error {
+func (fm *FeedManager) Unsubscribe(address string, logger log.Logger) error {
 	level.Info(logger).Log("msg", "Unsubscribing from feed", "address", address)
 	query := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", address)
 	return fm.TendermintClient.Unsubscribe(context.Background(), "unsubscribe", query)
@@ -130,7 +133,7 @@ func (fm *FeedManager) getAggregator(proxyAddress string) (aggregator *string, e
 	return &aggregatorAddress, nil
 }
 
-func (fm *FeedManager) initializeFeeds(ch chan types.Message, logger log.Logger) error {
+func (fm *FeedManager) InitializeFeeds(ch chan types.Message, logger log.Logger) error {
 	for _, feed := range fm.Feeds {
 		aggregator, err := fm.getAggregator(feed.ContractAddress)
 		if err != nil {
@@ -141,7 +144,7 @@ func (fm *FeedManager) initializeFeeds(ch chan types.Message, logger log.Logger)
 		feed.Aggregator = *aggregator
 		fm.Feeds[feed.ContractAddress] = feed
 
-		err = fm.subscribe(*aggregator, ch, logger)
+		err = fm.Subscribe(*aggregator, ch, logger)
 
 		if err != nil {
 			level.Error(logger).Log("msg", "Can't subscribe to address", "err", err)
@@ -152,7 +155,7 @@ func (fm *FeedManager) initializeFeeds(ch chan types.Message, logger log.Logger)
 	return nil
 }
 
-func (fm *FeedManager) poll(msgs chan types.Message, mu *sync.Mutex, logger log.Logger) {
+func (fm *FeedManager) Poll(msgs chan types.Message, mu *sync.Mutex, logger log.Logger) {
 	newFeeds := make(map[string]types.Feed)
 	ticker := time.NewTicker(5 * time.Second)
 
@@ -183,7 +186,7 @@ func (fm *FeedManager) updateFeed(feed types.Feed, msgs chan types.Message, logg
 		feed.Aggregator = *aggregator
 		fm.Feeds[feed.ContractAddress] = feed
 
-		err = fm.subscribe(*aggregator, msgs, logger)
+		err = fm.Subscribe(*aggregator, msgs, logger)
 		if err != nil {
 			level.Error(logger).Log("msg", "Could not subscribe to feed", "err", err)
 			return

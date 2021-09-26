@@ -1,13 +1,15 @@
-package main
+package exporter
 
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"sync"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/hackbg/terra-chainlink-exporter/collector"
+	"github.com/hackbg/terra-chainlink-exporter/manager"
 	"github.com/hackbg/terra-chainlink-exporter/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/segmentio/kafka-go"
@@ -15,31 +17,35 @@ import (
 	wasmTypes "github.com/terra-money/core/x/wasm/types"
 )
 
-func newKafkaWriter(kafkaURL, topic string) *kafka.Writer {
-	return &kafka.Writer{
-		Addr:     kafka.TCP(kafkaURL),
-		Topic:    topic,
-		Balancer: &kafka.LeastBytes{},
+const (
+	ContractType = "flux_monitor"
+)
+
+func StringToInt(s string) int {
+	i, err := strconv.Atoi(s)
+	if err != nil {
+		return 0
 	}
+	return i
 }
 
 var (
 	// Counters
-	fmAnswersTotal = prometheus.NewCounterVec(
+	FmAnswersTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "flux_monitor_answers_total",
 			Help: "Reports the number of on-chain answers for a feed",
 		},
 		[]string{"contract_address"},
 	)
-	fmSubmissionsReceivedTotal = prometheus.NewCounterVec(
+	FmSubmissionsReceivedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "flux_monitor_submissions_received_total",
 			Help: "Reports the current number of submissions",
 		},
 		[]string{"contract_address", "sender"},
 	)
-	fmRoundsCounter = prometheus.NewCounterVec(
+	FmRoundsCounter = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "flux_monitor_rounds",
 			Help: "The number of rounds the monitor has observed on a feed",
@@ -47,35 +53,35 @@ var (
 		[]string{"contract_address"},
 	)
 	// Gauges
-	fmSubmissionReceivedValuesGauge = prometheus.NewGaugeVec(
+	FmSubmissionReceivedValuesGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "flux_monitor_submission_received_values",
 			Help: "Reports the current submission value for an oracle on a feed",
 		},
 		[]string{"contract_address", "sender"},
 	)
-	nodeMetadataGauge = prometheus.NewGaugeVec(
+	NodeMetadataGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "node_metadata",
 			Help: "Exposes metdata for node",
 		},
 		[]string{"chain_id", "network_name", "oracle", "sender"},
 	)
-	feedContractMetadataGauge = prometheus.NewGaugeVec(
+	FeedContractMetadataGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "feed_contract_metadata",
 			Help: "Exposes metadata for individual feeds",
 		},
 		[]string{"chain_id", "contract_address", "contract_status", "contract_type", "feed_name", "feed_path", "network_id", "network_name", "symbol"},
 	)
-	fmAnswersGauge = prometheus.NewGaugeVec(
+	FmAnswersGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "flux_monitor_answers",
 			Help: "Reports the current on chain price for a feed.",
 		},
 		[]string{"contract_address"},
 	)
-	fmCurrentHeadGauge = prometheus.NewGaugeVec(
+	FmCurrentHeadGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "head_tracker_current_head",
 			Help: "Tracks the current block height that the monitoring instance has processed",
@@ -83,7 +89,7 @@ var (
 		[]string{"network_name", "chain_id"},
 	)
 	// TODO:
-	fmLatestRoundResponsesGauge = prometheus.NewGaugeVec(
+	FmLatestRoundResponsesGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "flux_monitor_latest_round_responses",
 			Help: "Reports the current number of submissions received for the latest round for a feed",
@@ -91,7 +97,7 @@ var (
 		[]string{"contract_address"},
 	)
 	// TODO:
-	fmRoundAge = prometheus.NewGaugeVec(
+	FmRoundAge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "flux_monitor_round_age",
 			Help: "Indicates how many blocks have been mined after a round started where no answer has been produced",
@@ -101,7 +107,7 @@ var (
 )
 
 type Exporter struct {
-	feedManager FeedManager
+	feedManager manager.FeedManager
 	logger      log.Logger
 	msgCh       chan types.Message
 	mutex       sync.Mutex
@@ -123,7 +129,7 @@ type Exporter struct {
 	answersEvents    []types.EventAnswerUpdated
 }
 
-func NewExporter(fm FeedManager, l log.Logger, ch chan types.Message, kafka *kafka.Writer) (*Exporter, error) {
+func NewExporter(fm manager.FeedManager, l log.Logger, ch chan types.Message, kafka *kafka.Writer) (*Exporter, error) {
 	e := Exporter{
 		feedManager: fm,
 		logger:      l,
@@ -131,27 +137,27 @@ func NewExporter(fm FeedManager, l log.Logger, ch chan types.Message, kafka *kaf
 		mutex:       sync.Mutex{},
 		kafkaWriter: kafka,
 
-		answersCounter: fmAnswersTotal,
-		answersGauge:   fmAnswersGauge,
+		answersCounter: FmAnswersTotal,
+		answersGauge:   FmAnswersGauge,
 
-		submissionsCounter: fmSubmissionsReceivedTotal,
-		submissionsGauge:   fmSubmissionReceivedValuesGauge,
+		submissionsCounter: FmSubmissionsReceivedTotal,
+		submissionsGauge:   FmSubmissionReceivedValuesGauge,
 
-		roundsCounter: fmRoundsCounter,
+		roundsCounter: FmRoundsCounter,
 
-		nodeMetadataGauge:     nodeMetadataGauge,
-		contractMetadataGauge: feedContractMetadataGauge,
+		nodeMetadataGauge:     NodeMetadataGauge,
+		contractMetadataGauge: FeedContractMetadataGauge,
 
-		currentHeadGauge:        fmCurrentHeadGauge,
-		latetRoundResponseGauge: fmLatestRoundResponsesGauge,
-		roundAgeGauge:           fmRoundAge,
+		currentHeadGauge:        FmCurrentHeadGauge,
+		latetRoundResponseGauge: FmLatestRoundResponsesGauge,
+		roundAgeGauge:           FmRoundAge,
 
 		roundsEvents:     []types.EventNewRound{},
 		submissionEvents: []types.EventSubmissionReceived{},
 		answersEvents:    []types.EventAnswerUpdated{},
 	}
 
-	err := e.feedManager.initializeFeeds(e.msgCh, e.logger)
+	err := e.feedManager.InitializeFeeds(e.msgCh, e.logger)
 	if err != nil {
 		level.Error(l).Log("msg", "Could not initialize feeds", "err", err)
 		return nil, err
@@ -393,7 +399,7 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 		for _, confirm := range event.ConfirmAggregator {
 			// This event indicates that the aggregator address for a feed has changed
 			// So we need to unsubscribe from old aggregator's events
-			err := e.feedManager.unsubscribe(e.feedManager.Feeds[confirm.Feed].Aggregator, e.logger)
+			err := e.feedManager.Unsubscribe(e.feedManager.Feeds[confirm.Feed].Aggregator, e.logger)
 			if err != nil {
 				level.Error(e.logger).Log("msg", "Could not unsubscribe old aggregator", "err", err)
 				continue
@@ -403,9 +409,9 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 			feed.Aggregator = confirm.NewAggregator
 			e.feedManager.Feeds[confirm.Feed] = feed
 			// And subscribe to new aggregator's events
-			err = e.feedManager.subscribe(confirm.NewAggregator, e.msgCh, e.logger)
+			err = e.feedManager.Subscribe(confirm.NewAggregator, e.msgCh, e.logger)
 			if err != nil {
-				level.Error(e.logger).Log("msg", "Could not unsubscribe old aggregator", "err", err)
+				level.Error(e.logger).Log("msg", "Could subscribe to new aggregator", "err", err)
 				continue
 			}
 		}
@@ -435,5 +441,5 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 }
 
 func (e *Exporter) pollChanges() {
-	go e.feedManager.poll(e.msgCh, &e.mutex, e.logger)
+	go e.feedManager.Poll(e.msgCh, &e.mutex, e.logger)
 }
