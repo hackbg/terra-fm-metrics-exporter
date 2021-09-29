@@ -3,6 +3,8 @@ package exporter
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"os"
 	"strconv"
 	"sync"
 
@@ -16,6 +18,8 @@ import (
 	tmTypes "github.com/tendermint/tendermint/types"
 	wasmTypes "github.com/terra-money/core/x/wasm/types"
 )
+
+var CONFIG_URL = os.Getenv("CONFIG_URL")
 
 const (
 	ContractType = "flux_monitor"
@@ -107,7 +111,7 @@ var (
 )
 
 type Exporter struct {
-	feedManager manager.FeedManager
+	managers    map[string]*manager.FeedManager
 	logger      log.Logger
 	msgCh       chan types.Message
 	mutex       sync.Mutex
@@ -129,9 +133,49 @@ type Exporter struct {
 	answersEvents    []types.EventAnswerUpdated
 }
 
-func NewExporter(fm manager.FeedManager, l log.Logger, ch chan types.Message, kafka *kafka.Writer) (*Exporter, error) {
+func getConfig(feeds map[string]types.FeedConfig) error {
+	var config []types.FeedConfig
+	response, err := http.Get(CONFIG_URL)
+	if err != nil {
+		return err
+	}
+
+	err = json.NewDecoder(response.Body).Decode(&config)
+	defer response.Body.Close()
+
+	if err != nil {
+		return err
+	}
+
+	for _, feed := range config {
+		feeds[feed.ContractAddress] = feed
+	}
+
+	return nil
+}
+
+func NewExporter(l log.Logger, ch chan types.Message, kafka *kafka.Writer) (*Exporter, error) {
+	feeds := make(map[string]types.FeedConfig)
+
+	err := getConfig(feeds)
+
+	if err != nil {
+		return nil, err
+	}
+
+	managers := make(map[string]*manager.FeedManager)
+
+	for k, feed := range feeds {
+		manager, err := manager.NewManager(feed)
+		if err != nil {
+			level.Error(l).Log("msg", "Could not create a new manager", "err", err)
+			continue
+		}
+		managers[k] = manager
+	}
+
 	e := Exporter{
-		feedManager: fm,
+		managers:    managers,
 		logger:      l,
 		msgCh:       ch,
 		mutex:       sync.Mutex{},
@@ -157,15 +201,36 @@ func NewExporter(fm manager.FeedManager, l log.Logger, ch chan types.Message, ka
 		answersEvents:    []types.EventAnswerUpdated{},
 	}
 
-	err := e.feedManager.InitializeFeeds(e.msgCh, e.logger)
+	err = e.InitializeFeeds(e.msgCh, e.logger)
 	if err != nil {
 		level.Error(l).Log("msg", "Could not initialize feeds", "err", err)
 		return nil, err
 	}
-	e.pollChanges()
+	//e.pollChanges()
 	e.storeEvents(e.msgCh)
 
 	return &e, nil
+}
+
+func (e *Exporter) InitializeFeeds(ch chan types.Message, logger log.Logger) error {
+	for _, manager := range e.managers {
+		aggregator, err := manager.GetAggregator(manager.Feed.ContractAddress)
+		if err != nil {
+			level.Error(logger).Log("msg", "Could not get the aggregator address", "err", err)
+			return err
+		}
+		// update the feed
+		manager.Feed.Aggregator = *aggregator
+
+		err = manager.Subscribe(ch, logger)
+
+		if err != nil {
+			level.Error(logger).Log("msg", "Can't subscribe to address", "err", err)
+			return err
+		}
+
+	}
+	return nil
 }
 
 // Describe describes all the metrics ever exporter (not including ones that should read from ws) by the Terra Chainlink exporter.
@@ -182,7 +247,8 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	e.mutex.Lock()
 
 	e.collectLatestRoundData(ch)
-	e.collectLatestBlockHeight(ch)
+	// TODO:
+	//e.collectLatestBlockHeight(ch)
 	e.collectAggregatorConfig(ch)
 	e.collectRoundMetrics(ch)
 	e.collectSubmissionMetrics(ch)
@@ -237,11 +303,11 @@ func (e *Exporter) collectAnswerMetrics(ch chan<- prometheus.Metric) bool {
 }
 
 func (e *Exporter) collectLatestRoundData(ch chan<- prometheus.Metric) bool {
-	for _, feed := range e.feedManager.Feeds {
-		response, err := e.feedManager.WasmClient.ContractStore(
+	for _, manager := range e.managers {
+		response, err := manager.WasmClient.ContractStore(
 			context.Background(),
 			&wasmTypes.QueryContractStoreRequest{
-				ContractAddress: feed.ContractAddress,
+				ContractAddress: manager.Feed.ContractAddress,
 				QueryMsg:        []byte(`{"aggregator_query": {"get_latest_round_data": {}}}`),
 			},
 		)
@@ -258,7 +324,7 @@ func (e *Exporter) collectLatestRoundData(ch chan<- prometheus.Metric) bool {
 			level.Error(e.logger).Log("msg", "Can't parse latest round response", "err", err)
 			return false
 		}
-		e.answersGauge.WithLabelValues(feed.ContractAddress).Set(float64(StringToInt(res.Answer)))
+		e.answersGauge.WithLabelValues(manager.Feed.ContractAddress).Set(float64(StringToInt(res.Answer)))
 		e.answersGauge.Collect(ch)
 		e.answersGauge.Reset()
 	}
@@ -266,38 +332,38 @@ func (e *Exporter) collectLatestRoundData(ch chan<- prometheus.Metric) bool {
 	return true
 }
 
-func (e *Exporter) collectLatestBlockHeight(ch chan<- prometheus.Metric) bool {
-	status, err := e.feedManager.TendermintClient.Status(context.Background())
-	if err != nil {
-		level.Error(e.logger).Log("msg", "Can't get the latest block height", "err", err)
-		return false
-	}
+// func (e *Exporter) collectLatestBlockHeight(ch chan<- prometheus.Metric) bool {
+// 	status, err := e.TendermintClient.Status(context.Background())
+// 	if err != nil {
+// 		level.Error(e.logger).Log("msg", "Can't get the latest block height", "err", err)
+// 		return false
+// 	}
 
-	level.Info(e.logger).Log("network", status.NodeInfo.Network)
+// 	level.Info(e.logger).Log("network", status.NodeInfo.Network)
 
-	e.currentHeadGauge.WithLabelValues(status.NodeInfo.Network, status.NodeInfo.Moniker).Set(float64(status.SyncInfo.LatestBlockHeight))
-	e.currentHeadGauge.Collect(ch)
-	e.currentHeadGauge.Reset()
+// 	e.currentHeadGauge.WithLabelValues(status.NodeInfo.Network, status.NodeInfo.Moniker).Set(float64(status.SyncInfo.LatestBlockHeight))
+// 	e.currentHeadGauge.Collect(ch)
+// 	e.currentHeadGauge.Reset()
 
-	// TODO:
-	e.nodeMetadataGauge.WithLabelValues(status.NodeInfo.Network, status.NodeInfo.Moniker, "placeholder", "placeholder").Set(1)
-	e.nodeMetadataGauge.Collect(ch)
-	e.nodeMetadataGauge.Reset()
+// 	// TODO:
+// 	e.nodeMetadataGauge.WithLabelValues(status.NodeInfo.Network, status.NodeInfo.Moniker, "placeholder", "placeholder").Set(1)
+// 	e.nodeMetadataGauge.Collect(ch)
+// 	e.nodeMetadataGauge.Reset()
 
-	return true
-}
+// 	return true
+// }
 
 func (e *Exporter) collectAggregatorConfig(ch chan<- prometheus.Metric) bool {
-	status, err := e.feedManager.TendermintClient.Status(context.Background())
-	if err != nil {
-		level.Error(e.logger).Log("msg", "Can't get the latest block height", "err", err)
-		return false
-	}
-	for _, feed := range e.feedManager.Feeds {
-		config, err := e.feedManager.WasmClient.ContractStore(
+	for _, manager := range e.managers {
+		status, err := manager.TendermintClient.Status(context.Background())
+		if err != nil {
+			level.Error(e.logger).Log("msg", "Can't get the latest block height", "err", err)
+			return false
+		}
+		config, err := manager.WasmClient.ContractStore(
 			context.Background(),
 			&wasmTypes.QueryContractStoreRequest{
-				ContractAddress: feed.Aggregator,
+				ContractAddress: manager.Feed.Aggregator,
 				QueryMsg:        []byte(`{"get_aggregator_config": {}}`),
 			},
 		)
@@ -317,14 +383,14 @@ func (e *Exporter) collectAggregatorConfig(ch chan<- prometheus.Metric) bool {
 
 		e.contractMetadataGauge.WithLabelValues(
 			status.NodeInfo.Network,
-			feed.Aggregator,
-			feed.Status,
+			manager.Feed.Aggregator,
+			manager.Feed.Status,
 			ContractType,
-			feed.Name,
-			feed.Path,
+			manager.Feed.Name,
+			manager.Feed.Path,
 			status.NodeInfo.Network,
 			status.NodeInfo.Moniker,
-			feed.Symbol,
+			manager.Feed.Symbol,
 		).Set(1)
 		e.contractMetadataGauge.Collect(ch)
 		e.contractMetadataGauge.Reset()
@@ -399,17 +465,17 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 		for _, confirm := range event.ConfirmAggregator {
 			// This event indicates that the aggregator address for a feed has changed
 			// So we need to unsubscribe from old aggregator's events
-			err := e.feedManager.Unsubscribe(e.feedManager.Feeds[confirm.Feed].Aggregator, e.logger)
+			err := e.managers[confirm.Feed].Unsubscribe(e.logger)
 			if err != nil {
 				level.Error(e.logger).Log("msg", "Could not unsubscribe old aggregator", "err", err)
 				continue
 			}
 			// Update the feed's aggregator
-			feed := e.feedManager.Feeds[confirm.Feed]
+			feed := e.managers[confirm.Feed].Feed
 			feed.Aggregator = confirm.NewAggregator
-			e.feedManager.Feeds[confirm.Feed] = feed
+			e.managers[confirm.Feed].Feed = feed
 			// And subscribe to new aggregator's events
-			err = e.feedManager.Subscribe(confirm.NewAggregator, e.msgCh, e.logger)
+			err = e.managers[confirm.Feed].Subscribe(e.msgCh, e.logger)
 			if err != nil {
 				level.Error(e.logger).Log("msg", "Could subscribe to new aggregator", "err", err)
 				continue
@@ -440,6 +506,7 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 	}()
 }
 
-func (e *Exporter) pollChanges() {
-	go e.feedManager.Poll(e.msgCh, &e.mutex, e.logger)
-}
+// TODO:
+// func (e *Exporter) pollChanges() {
+// 	go e.feedManager.Poll(e.msgCh, &e.mutex, e.logger)
+// }

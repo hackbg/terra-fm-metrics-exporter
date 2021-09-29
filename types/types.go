@@ -117,7 +117,7 @@ type TxInfo struct {
 	Tx     string
 }
 
-type Feed struct {
+type FeedConfig struct {
 	ContractAddress string   `json:"contractAddress"`
 	ContractVersion int      `json:"contractVersion"`
 	DecimalPlaces   int      `json:"decimalPlaces"`

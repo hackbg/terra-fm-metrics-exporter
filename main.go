@@ -13,7 +13,6 @@ import (
 	"github.com/prometheus/common/version"
 
 	"github.com/hackbg/terra-chainlink-exporter/exporter"
-	"github.com/hackbg/terra-chainlink-exporter/manager"
 	"github.com/hackbg/terra-chainlink-exporter/types"
 )
 
@@ -49,18 +48,11 @@ func main() {
 	promlogConfig := &promlog.Config{}
 	logger := promlog.New(promlogConfig)
 
-	feedManager, err := manager.NewManager(TENDERMINT_URL, RPC_ADDR)
-	if err != nil {
-		level.Error(logger).Log("msg", "Could not initialize feed manager", "err", err)
-		os.Exit(1)
-	}
-	defer feedManager.TendermintClient.Stop()
-
 	msgs := make(chan types.Message)
 
 	// Initialize the exporter
 	kafkaWriter := NewKafkaWriter(KAFKA_SERVER, TOPIC)
-	exporter, err := exporter.NewExporter(*feedManager, logger, msgs, kafkaWriter)
+	exporter, err := exporter.NewExporter(logger, msgs, kafkaWriter)
 	if err != nil {
 		level.Error(logger).Log("msg", "Could not create exporter", "err", err)
 		return
