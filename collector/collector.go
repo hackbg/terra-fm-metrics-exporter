@@ -59,6 +59,7 @@ func ParseEvents(events []tmrTypes.Event, txInfo types.TxInfo, feedAddr string) 
 			}
 			eventRecords.OraclePermissionsUpdated = append(eventRecords.OraclePermissionsUpdated, permissionsUpdated...)
 		case "wasm-confirm_aggregator":
+			fmt.Println("Got wasm-confirm-aggregator")
 			confirmAggregator, err := parseConfirmAggregatorEvent(event)
 			if err != nil {
 				return nil, err

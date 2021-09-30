@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/go-kit/kit/log/level"
 	"github.com/segmentio/kafka-go"
@@ -25,12 +26,13 @@ func NewKafkaWriter(kafkaURL, topic string) *kafka.Writer {
 }
 
 var (
-	ConstLabels    map[string]string
-	RPC_ADDR       = os.Getenv("TERRA_RPC")
-	TENDERMINT_URL = os.Getenv("TENDERMINT_URL")
-	KAFKA_SERVER   = os.Getenv("KAFKA_SERVER")
-	TOPIC          = os.Getenv("TOPIC")
-	SERVICE_PORT   = os.Getenv("SERVICE_PORT")
+	ConstLabels      map[string]string
+	RPC_ADDR         = os.Getenv("TERRA_RPC")
+	TENDERMINT_URL   = os.Getenv("TENDERMINT_URL")
+	KAFKA_SERVER     = os.Getenv("KAFKA_SERVER")
+	TOPIC            = os.Getenv("TOPIC")
+	SERVICE_PORT     = os.Getenv("SERVICE_PORT")
+	POLLING_INTERVAL = os.Getenv("POLLING_INTERVAL")
 )
 
 func init() {
@@ -50,9 +52,19 @@ func main() {
 
 	msgs := make(chan types.Message)
 
+	if POLLING_INTERVAL == "" {
+		POLLING_INTERVAL = "5s"
+	}
+	pollingInterval, err := time.ParseDuration(POLLING_INTERVAL)
+
+	if err != nil {
+		level.Error(logger).Log("msg", "Could not set the polling interval", "err", err)
+		os.Exit(1)
+	}
+
 	// Initialize the exporter
 	kafkaWriter := NewKafkaWriter(KAFKA_SERVER, TOPIC)
-	exporter, err := exporter.NewExporter(logger, msgs, kafkaWriter)
+	exporter, err := exporter.NewExporter(logger, msgs, kafkaWriter, pollingInterval)
 	if err != nil {
 		level.Error(logger).Log("msg", "Could not create exporter", "err", err)
 		return
