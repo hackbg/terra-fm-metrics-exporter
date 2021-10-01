@@ -28,6 +28,7 @@ func NewManager(feed types.FeedConfig, client *tmrpc.HTTP, logger log.Logger) *F
 
 func (fm *FeedManager) Subscribe(msgs chan types.Message, logger log.Logger, address string) (err error) {
 	level.Info(logger).Log("msg", "Subscribing to feed events", "address", address)
+	proxyAddress := fm.Feed.ContractAddress
 	query := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", address)
 	out, err := fm.TendermintClient.Subscribe(context.Background(), "subscribe", query)
 
@@ -41,7 +42,7 @@ func (fm *FeedManager) Subscribe(msgs chan types.Message, logger log.Logger, add
 			if !ok {
 				return
 			}
-			msg := types.Message{Event: resp, Address: fm.Feed.ContractAddress}
+			msg := types.Message{Event: resp, Address: proxyAddress}
 			msgs <- msg
 		}
 	}()
