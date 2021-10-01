@@ -33,13 +33,6 @@ const (
 	ContractType = "flux_monitor"
 )
 
-type Contract int
-
-const (
-	PROXY Contract = iota
-	AGGREGATOR
-)
-
 func StringToInt(s string) int {
 	i, err := strconv.Atoi(s)
 	if err != nil {
@@ -219,7 +212,7 @@ func NewExporter(l log.Logger, ch chan types.Message, kafka *kafka.Writer, polli
 		return nil, err
 	}
 
-	// fetch feeds
+	// fetch feed configurations
 	feeds := make(map[string]types.FeedConfig)
 	err = GetConfig(feeds)
 	if err != nil {
@@ -278,7 +271,7 @@ func NewExporter(l log.Logger, ch chan types.Message, kafka *kafka.Writer, polli
 }
 
 func (e *Exporter) subscribeFeed(ch chan types.Message, logger log.Logger, manager *manager.FeedManager) error {
-	aggregator, err := manager.GetAggregator(manager.Feed.ContractAddress, e.WasmClient)
+	aggregator, err := manager.GetAggregator(e.WasmClient)
 	if err != nil {
 		level.Error(logger).Log("msg", "Could not get the aggregator address", "err", err)
 		return err
@@ -286,12 +279,14 @@ func (e *Exporter) subscribeFeed(ch chan types.Message, logger log.Logger, manag
 	// update the feed
 	manager.Feed.Aggregator = *aggregator
 
+	// sub proxy first
 	err = manager.Subscribe(ch, logger, manager.Feed.ContractAddress)
 	if err != nil {
 		level.Error(logger).Log("msg", "Can't subscribe to proxy address", "err", err)
 		return err
 	}
 
+	// sub aggregator
 	err = manager.Subscribe(ch, logger, manager.Feed.Aggregator)
 	if err != nil {
 		level.Error(logger).Log("msg", "Can't subscribe to aggregator address", "err", err)
@@ -544,20 +539,21 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 			e.answersEvents = append(e.answersEvents, update)
 		}
 		for _, confirm := range event.ConfirmAggregator {
+			feed := e.managers[confirm.Feed].Feed
 			// This event indicates that the aggregator address for a feed has changed
 			// So we need to unsubscribe from old aggregator's events
-			err := e.managers[confirm.Feed].Unsubscribe(e.logger)
+			err := e.managers[confirm.Feed].Unsubscribe(e.logger, feed.Aggregator)
 			if err != nil {
 				level.Error(e.logger).Log("msg", "Could not unsubscribe old aggregator", "err", err)
 				continue
 			}
-			//Update the feed's aggregator
-			feed := e.managers[confirm.Feed].Feed
+
+			// Update the feed's aggregator
 			feed.Aggregator = confirm.NewAggregator
 			e.managers[confirm.Feed].Feed = feed
 
 			// And subscribe to new aggregator's events
-			err = e.managers[confirm.Feed].Subscribe(e.msgCh, e.logger, feed.Aggregator)
+			err = e.managers[confirm.Feed].Subscribe(e.msgCh, e.logger, confirm.NewAggregator)
 			if err != nil {
 				level.Error(e.logger).Log("msg", "Could not subscribe to new aggregator", "err", err)
 				continue
@@ -621,7 +617,7 @@ func (e *Exporter) poll() {
 				}
 			}
 			// if the feed exists, update the config
-			e.managers[feed.ContractAddress].UpdateFeed(e.msgCh, e.WasmClient, e.logger, feed)
+			e.managers[feed.ContractAddress].UpdateFeed(e.WasmClient, e.logger, feed)
 			e.mutex.Unlock()
 		}
 	}

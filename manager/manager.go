@@ -27,7 +27,7 @@ func NewManager(feed types.FeedConfig, client *tmrpc.HTTP, logger log.Logger) *F
 }
 
 func (fm *FeedManager) Subscribe(msgs chan types.Message, logger log.Logger, address string) (err error) {
-	level.Info(logger).Log("msg", "Subscribing to feed", "address", address)
+	level.Info(logger).Log("msg", "Subscribing to feed events", "address", address)
 	query := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", address)
 	out, err := fm.TendermintClient.Subscribe(context.Background(), "subscribe", query)
 
@@ -41,7 +41,7 @@ func (fm *FeedManager) Subscribe(msgs chan types.Message, logger log.Logger, add
 			if !ok {
 				return
 			}
-			msg := types.Message{Event: resp, Address: fm.Feed.Aggregator}
+			msg := types.Message{Event: resp, Address: fm.Feed.ContractAddress}
 			msgs <- msg
 		}
 	}()
@@ -49,17 +49,17 @@ func (fm *FeedManager) Subscribe(msgs chan types.Message, logger log.Logger, add
 	return nil
 }
 
-func (fm *FeedManager) Unsubscribe(logger log.Logger) error {
-	level.Info(logger).Log("msg", "Unsubscribing from feed", "address", fm.Feed.Aggregator)
-	query := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", fm.Feed.Aggregator)
+func (fm *FeedManager) Unsubscribe(logger log.Logger, address string) error {
+	level.Info(logger).Log("msg", "Unsubscribing from feed events", "address", address)
+	query := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", address)
 	return fm.TendermintClient.Unsubscribe(context.Background(), "unsubscribe", query)
 }
 
-func (fm *FeedManager) GetAggregator(proxyAddress string, wasmClient wasmTypes.QueryClient) (aggregator *string, err error) {
+func (fm *FeedManager) GetAggregator(wasmClient wasmTypes.QueryClient) (aggregator *string, err error) {
 	res, err := wasmClient.ContractStore(
 		context.Background(),
 		&wasmTypes.QueryContractStoreRequest{
-			ContractAddress: proxyAddress,
+			ContractAddress: fm.Feed.ContractAddress,
 			QueryMsg:        []byte(`{"get_aggregator": {}}`),
 		},
 	)
@@ -78,8 +78,8 @@ func (fm *FeedManager) GetAggregator(proxyAddress string, wasmClient wasmTypes.Q
 	return &aggregatorAddress, nil
 }
 
-func (fm *FeedManager) UpdateFeed(msgs chan types.Message, wasmClient wasmTypes.QueryClient, logger log.Logger, newConfig types.FeedConfig) {
-	aggregator, err := fm.GetAggregator(fm.Feed.ContractAddress, wasmClient)
+func (fm *FeedManager) UpdateFeed(wasmClient wasmTypes.QueryClient, logger log.Logger, newConfig types.FeedConfig) {
+	aggregator, err := fm.GetAggregator(wasmClient)
 	if err != nil {
 		level.Error(logger).Log("msg", "Could not get the aggregator address", "err", err)
 		return
@@ -88,7 +88,6 @@ func (fm *FeedManager) UpdateFeed(msgs chan types.Message, wasmClient wasmTypes.
 	res := cmp.Equal(fm.Feed, newConfig, cmpopts.IgnoreFields(fm.Feed, "Aggregator"))
 	// if either changed we need to update and resubscribe
 	if !res {
-		fmt.Println("RES is false")
 		level.Info(logger).Log("msg", "Feed configuration has changed")
 		newConfig.Aggregator = *aggregator
 		fm.Feed = newConfig

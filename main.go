@@ -66,7 +66,7 @@ func main() {
 	kafkaWriter := NewKafkaWriter(KAFKA_SERVER, TOPIC)
 	exporter, err := exporter.NewExporter(logger, msgs, kafkaWriter, pollingInterval)
 	if err != nil {
-		level.Error(logger).Log("msg", "Could not create exporter", "err", err)
+		level.Error(logger).Log("msg", "Could not create the exporter", "err", err)
 		return
 	}
 	// Register the exporter
