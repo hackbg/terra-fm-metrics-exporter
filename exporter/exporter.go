@@ -263,7 +263,7 @@ func NewExporter(l log.Logger, ch chan types.Message, kafka *kafka.Writer, polli
 	}
 
 	// subscribe to feeds events
-	e.SubscribeFeeds(e.msgCh, e.logger)
+	e.subscribeFeeds(e.msgCh, e.logger)
 	e.pollChanges()
 	e.storeEvents(e.msgCh)
 
@@ -296,7 +296,7 @@ func (e *Exporter) subscribeFeed(ch chan types.Message, logger log.Logger, manag
 	return nil
 }
 
-func (e *Exporter) SubscribeFeeds(ch chan types.Message, logger log.Logger) {
+func (e *Exporter) subscribeFeeds(ch chan types.Message, logger log.Logger) {
 	for _, manager := range e.managers {
 		err := e.subscribeFeed(ch, logger, manager)
 		if err != nil {
