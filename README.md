@@ -9,6 +9,7 @@
 | `KAFKA_SERVER`             | Kafka Connection URL                                                                       | `kafka:9092`                                                       |
 | `TOPIC`                    | Kafka Topic that the events are pushed to                                                  | `Terra`                                                            |
 | `CONFIG_URL`               | URL to poll for feed configs                                                               | `http://localhost:4000/configs`                                    |
+| `POLLING_INTERVAL`         | Polling interval for feed configurations                                                   | `10s`                                                              |
 ---
 - [x] Counters
   - [x] flux_monitor_answers_total
