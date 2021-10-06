@@ -126,7 +126,7 @@ type Exporter struct {
 
 	logger      log.Logger
 	msgCh       chan types.Message
-	mutex       sync.Mutex
+	mutex       sync.RWMutex
 	kafkaWriter *kafka.Writer
 
 	pollingInterval time.Duration
@@ -141,10 +141,6 @@ type Exporter struct {
 	currentHeadGauge        *prometheus.GaugeVec
 	latetRoundResponseGauge *prometheus.GaugeVec
 	roundAgeGauge           *prometheus.GaugeVec
-
-	roundsEvents     []types.EventNewRound
-	submissionEvents []types.EventSubmissionReceived
-	answersEvents    []types.EventAnswerUpdated
 }
 
 func NewWasmClient() (wasmClient wasmTypes.QueryClient, err error) {
@@ -237,7 +233,7 @@ func NewExporter(l log.Logger, ch chan types.Message, kafka *kafka.Writer, polli
 		TendermintClient: tendermintClient,
 		logger:           l,
 		msgCh:            ch,
-		mutex:            sync.Mutex{},
+		mutex:            sync.RWMutex{},
 		kafkaWriter:      kafka,
 
 		pollingInterval: pollingInterval,
@@ -256,10 +252,6 @@ func NewExporter(l log.Logger, ch chan types.Message, kafka *kafka.Writer, polli
 		currentHeadGauge:        FmCurrentHeadGauge,
 		latetRoundResponseGauge: FmLatestRoundResponsesGauge,
 		roundAgeGauge:           FmRoundAge,
-
-		roundsEvents:     []types.EventNewRound{},
-		submissionEvents: []types.EventSubmissionReceived{},
-		answersEvents:    []types.EventAnswerUpdated{},
 	}
 
 	// subscribe to feeds events
@@ -303,165 +295,57 @@ func (e *Exporter) subscribeFeeds(ch chan types.Message, logger log.Logger) {
 			level.Error(logger).Log("msg", "Could not subscribe feed", "err", err)
 			continue
 		}
+		// set initial contract metadata
+		go e.setContractMetadata(manager.Feed.ContractAddress)
 	}
 }
 
-// Describe describes all the metrics ever exporter (not including ones that should read from ws) by the Terra Chainlink exporter.
-// It implements prometheus.Collector
-func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
-	e.contractMetadataGauge.Describe(ch)
-	e.answersGauge.Describe(ch)
-	e.currentHeadGauge.Describe(ch)
-}
+func (e *Exporter) setContractMetadata(proxyAddr string) {
+	e.mutex.RLock()
+	defer e.mutex.RUnlock()
 
-// Collect fetches the metrics
-// It implements prometheus.Collector.
-func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
-	e.mutex.Lock()
-
-	e.collectLatestRoundData(ch)
-	e.collectLatestBlockHeight(ch)
-	e.collectAggregatorConfig(ch)
-	e.collectRoundMetrics(ch)
-	e.collectSubmissionMetrics(ch)
-	e.collectAnswerMetrics(ch)
-
-	e.mutex.Unlock()
-}
-
-func (e *Exporter) collectRoundMetrics(ch chan<- prometheus.Metric) bool {
-	// aggregate the metrics
-	for _, round := range e.roundsEvents {
-		e.roundsCounter.With(prometheus.Labels{
-			"contract_address": round.Feed,
-		}).Inc()
-	}
-	// reset
-	e.roundsEvents = nil
-
-	return true
-}
-
-func (e *Exporter) collectSubmissionMetrics(ch chan<- prometheus.Metric) bool {
-	for _, submission := range e.submissionEvents {
-		e.submissionsCounter.With(prometheus.Labels{
-			"contract_address": submission.Feed,
-			"sender":           string(submission.Sender),
-		}).Inc()
-
-		e.submissionsGauge.With(prometheus.Labels{
-			"contract_address": submission.Feed,
-			"sender":           string(submission.Sender),
-		}).Set(float64(submission.Submission.Key.Int64()))
-	}
-	e.submissionEvents = nil
-
-	return true
-}
-
-func (e *Exporter) collectAnswerMetrics(ch chan<- prometheus.Metric) bool {
-	for _, answer := range e.answersEvents {
-		e.answersCounter.With(prometheus.Labels{
-			"contract_address": answer.Feed,
-		}).Inc()
-	}
-	e.answersEvents = nil
-
-	return true
-}
-
-func (e *Exporter) collectLatestRoundData(ch chan<- prometheus.Metric) bool {
-	for _, manager := range e.managers {
-		response, err := e.WasmClient.ContractStore(
-			context.Background(),
-			&wasmTypes.QueryContractStoreRequest{
-				ContractAddress: manager.Feed.ContractAddress,
-				QueryMsg:        []byte(`{"aggregator_query": {"get_latest_round_data": {}}}`),
-			},
-		)
-
-		if err != nil {
-			level.Error(e.logger).Log("msg", "Can't query the chain", "err", err)
-			return false
-		}
-
-		var res types.LatestRoundResponse
-		err = json.Unmarshal(response.QueryResult, &res)
-
-		if err != nil {
-			level.Error(e.logger).Log("msg", "Can't parse latest round response", "err", err)
-			return false
-		}
-		e.answersGauge.WithLabelValues(manager.Feed.ContractAddress).Set(float64(StringToInt(res.Answer)))
-		e.answersGauge.Collect(ch)
-		e.answersGauge.Reset()
-	}
-
-	return true
-}
-
-func (e *Exporter) collectLatestBlockHeight(ch chan<- prometheus.Metric) bool {
-	status, err := e.TendermintClient.Status(context.Background())
+	status, err := e.TendermintClient.Status(context.TODO())
 	if err != nil {
-		level.Error(e.logger).Log("msg", "Can't get the latest block height", "err", err)
-		return false
+		level.Error(e.logger).Log("msg", "Can't get the node status", "err", err)
+		return
 	}
 
-	e.currentHeadGauge.WithLabelValues(status.NodeInfo.Network, status.NodeInfo.Moniker).Set(float64(status.SyncInfo.LatestBlockHeight))
-	e.currentHeadGauge.Collect(ch)
-	e.currentHeadGauge.Reset()
+	feed := e.managers[proxyAddr].Feed
 
-	e.nodeMetadataGauge.WithLabelValues(status.NodeInfo.Network, status.NodeInfo.Moniker, "placeholder", "placeholder").Set(1)
-	e.nodeMetadataGauge.Collect(ch)
-	e.nodeMetadataGauge.Reset()
-
-	return true
+	e.contractMetadataGauge.WithLabelValues(
+		status.NodeInfo.Network,
+		feed.Aggregator,
+		feed.Status,
+		ContractType,
+		feed.Name,
+		feed.Path,
+		status.NodeInfo.Network,
+		status.NodeInfo.Moniker,
+		feed.Symbol,
+	).Set(1)
 }
 
-func (e *Exporter) collectAggregatorConfig(ch chan<- prometheus.Metric) bool {
-	for _, manager := range e.managers {
-		status, err := manager.TendermintClient.Status(context.Background())
-		if err != nil {
-			level.Error(e.logger).Log("msg", "Can't get the latest block height", "err", err)
-			return false
-		}
-		config, err := e.WasmClient.ContractStore(
-			context.Background(),
-			&wasmTypes.QueryContractStoreRequest{
-				ContractAddress: manager.Feed.Aggregator,
-				QueryMsg:        []byte(`{"get_aggregator_config": {}}`),
-			},
-		)
+func (e *Exporter) fetchNodeMetrics() {
+	e.mutex.RLock()
+	defer e.mutex.RUnlock()
 
-		if err != nil {
-			level.Error(e.logger).Log("msg", "Can't query aggregator", "err", err)
-			return false
-		}
-
-		var agggregatorConfig types.AggregatorConfigResponse
-		err = json.Unmarshal(config.QueryResult, &agggregatorConfig)
-
-		if err != nil {
-			level.Error(e.logger).Log("msg", "Can't parse aggregator config", "err", err)
-			return false
-		}
-
-		e.contractMetadataGauge.WithLabelValues(
-			status.NodeInfo.Network,
-			manager.Feed.Aggregator,
-			manager.Feed.Status,
-			ContractType,
-			manager.Feed.Name,
-			manager.Feed.Path,
-			status.NodeInfo.Network,
-			status.NodeInfo.Moniker,
-			manager.Feed.Symbol,
-		).Set(1)
-		e.contractMetadataGauge.Collect(ch)
-		e.contractMetadataGauge.Reset()
-
+	status, err := e.TendermintClient.Status(context.TODO())
+	if err != nil {
+		level.Error(e.logger).Log("msg", "Can't get the node status", "err", err)
+		return
 	}
-	return true
+
+	e.nodeMetadataGauge.WithLabelValues(
+		status.NodeInfo.Network,
+		status.NodeInfo.Moniker,
+		"placeholder",
+		"placeholder",
+	).Set(1)
+
+	e.currentHeadGauge.WithLabelValues(
+		status.NodeInfo.Network,
+		status.NodeInfo.Moniker,
+	).Set(float64(status.SyncInfo.LatestBlockHeight))
 }
 
 func (e *Exporter) storeEvents(out chan types.Message) {
@@ -487,7 +371,9 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 				"round", round.RoundId,
 				"Feed", round.Feed)
 
-			e.roundsEvents = append(e.roundsEvents, round)
+			e.roundsCounter.With(prometheus.Labels{
+				"contract_address": round.Feed,
+			}).Inc()
 			// fmLatestRoundResponsesGauge.With(prometheus.Labels{
 			// 	"contract_address": m.Feed.ContractAddress,
 			// }).Set(float64(m.latestRoundInfo.Submissions))
@@ -513,7 +399,15 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 				"round id", round.RoundId,
 				"submission", round.Submission.Key.Int64())
 
-			e.submissionEvents = append(e.submissionEvents, round)
+			e.submissionsCounter.With(prometheus.Labels{
+				"contract_address": round.Feed,
+				"sender":           string(round.Sender),
+			}).Inc()
+
+			e.submissionsGauge.With(prometheus.Labels{
+				"contract_address": round.Feed,
+				"sender":           string(round.Sender),
+			}).Set(float64(round.Submission.Key.Int64()))
 		}
 		for _, update := range event.AnswerUpdated {
 			res, err := json.Marshal(update)
@@ -536,7 +430,10 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 				"round", update.RoundId,
 				"Answer", update.Value.Key.Int64())
 
-			e.answersEvents = append(e.answersEvents, update)
+			e.answersCounter.With(prometheus.Labels{
+				"contract_address": update.Feed,
+			}).Inc()
+			e.answersGauge.WithLabelValues(update.Feed).Set(float64(update.Value.Key.Int64()))
 		}
 		for _, confirm := range event.ConfirmAggregator {
 			feed := e.managers[confirm.Feed].Feed
@@ -572,6 +469,9 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 			if !ok {
 				return
 			}
+
+			go e.fetchNodeMetrics()
+
 			info := collector.ExtractTxInfo(resp.Event.Data.(tmTypes.EventDataTx))
 			eventRecords, err := collector.ParseEvents(
 				resp.Event.Data.(tmTypes.EventDataTx).Result.Events,
@@ -618,6 +518,7 @@ func (e *Exporter) poll() {
 			}
 			// if the feed exists, update the config
 			e.managers[feed.ContractAddress].UpdateFeed(e.WasmClient, e.logger, feed)
+			go e.setContractMetadata(feed.ContractAddress)
 			e.mutex.Unlock()
 		}
 	}
