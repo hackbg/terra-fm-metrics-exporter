@@ -35,15 +35,19 @@ var (
 	POLLING_INTERVAL = os.Getenv("POLLING_INTERVAL")
 )
 
+// register metrics
 func init() {
 	prometheus.MustRegister(version.NewCollector("terra_chainlink"))
 	prometheus.MustRegister(exporter.FmAnswersTotal)
 	prometheus.MustRegister(exporter.FmSubmissionsReceivedTotal)
 	prometheus.MustRegister(exporter.FmSubmissionReceivedValuesGauge)
 	prometheus.MustRegister(exporter.FmRoundsCounter)
-	prometheus.MustRegister(exporter.NodeMetadataGauge)
 	prometheus.MustRegister(exporter.FmLatestRoundResponsesGauge)
 	prometheus.MustRegister(exporter.FmRoundAge)
+	prometheus.MustRegister(exporter.FmAnswersGauge)
+	prometheus.MustRegister(exporter.FmCurrentHeadGauge)
+	prometheus.MustRegister(exporter.NodeMetadataGauge)
+	prometheus.MustRegister(exporter.FeedContractMetadataGauge)
 }
 
 func main() {
@@ -64,13 +68,11 @@ func main() {
 
 	// Initialize the exporter
 	kafkaWriter := NewKafkaWriter(KAFKA_SERVER, TOPIC)
-	exporter, err := exporter.NewExporter(logger, msgs, kafkaWriter, pollingInterval)
+	_, err = exporter.NewExporter(logger, msgs, kafkaWriter, pollingInterval)
 	if err != nil {
 		level.Error(logger).Log("msg", "Could not create the exporter", "err", err)
 		return
 	}
-	// Register the exporter
-	prometheus.MustRegister(exporter)
 
 	http.Handle("/metrics", promhttp.Handler())
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
