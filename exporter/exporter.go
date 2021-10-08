@@ -274,14 +274,12 @@ func (e *Exporter) subscribeFeed(ch chan types.Message, logger log.Logger, manag
 	// sub proxy first
 	err = manager.Subscribe(ch, logger, manager.Feed.ContractAddress)
 	if err != nil {
-		level.Error(logger).Log("msg", "Can't subscribe to proxy address", "err", err)
 		return err
 	}
 
 	// sub aggregator
 	err = manager.Subscribe(ch, logger, manager.Feed.Aggregator)
 	if err != nil {
-		level.Error(logger).Log("msg", "Can't subscribe to aggregator address", "err", err)
 		return err
 	}
 
