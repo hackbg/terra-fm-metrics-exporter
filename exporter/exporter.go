@@ -348,25 +348,36 @@ func (e *Exporter) fetchNodeMetrics() {
 	).Set(float64(status.SyncInfo.LatestBlockHeight))
 }
 
+func (e *Exporter) writeToKafka(key string, value interface{}) error {
+	if e.kafkaWriter != nil {
+		message, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		err = e.kafkaWriter.WriteMessages(context.Background(),
+			kafka.Message{
+				Key:   []byte(key),
+				Value: message,
+			},
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (e *Exporter) storeEvents(out chan types.Message) {
 	handler := func(event types.EventRecords) {
 		e.mutex.Lock()
 		for _, round := range event.NewRound {
-			res, err := json.Marshal(round)
+			err := e.writeToKafka("NewRound", round)
 			if err != nil {
-				level.Error(e.logger).Log("msg", "Could not parse message", "err", err)
+				level.Error(e.logger).Log("msg", "Could not send message to kafka", "err", err)
 				continue
 			}
-			err = e.kafkaWriter.WriteMessages(context.Background(),
-				kafka.Message{
-					Key:   []byte("NewRound"),
-					Value: res,
-				},
-			)
-			if err != nil {
-				level.Error(e.logger).Log("msg", "Could not write kafka message", "err", err)
-				continue
-			}
+
 			level.Info(e.logger).Log("msg", "Got New Round event",
 				"round", round.RoundId,
 				"Feed", round.Feed)
@@ -374,24 +385,11 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 			e.roundsCounter.With(prometheus.Labels{
 				"contract_address": round.Feed,
 			}).Inc()
-			// fmLatestRoundResponsesGauge.With(prometheus.Labels{
-			// 	"contract_address": m.Feed.ContractAddress,
-			// }).Set(float64(m.latestRoundInfo.Submissions))
 		}
 		for _, round := range event.SubmissionReceived {
-			res, err := json.Marshal(round)
+			err := e.writeToKafka("SubmissionReceived", round)
 			if err != nil {
-				level.Error(e.logger).Log("msg", "Could not parse message", "err", err)
-				continue
-			}
-			err = e.kafkaWriter.WriteMessages(context.Background(),
-				kafka.Message{
-					Key:   []byte("SubmissionReceived"),
-					Value: res,
-				},
-			)
-			if err != nil {
-				level.Error(e.logger).Log("msg", "Could not write kafka message", "err", err)
+				level.Error(e.logger).Log("msg", "Could not send message to kafka", "err", err)
 				continue
 			}
 			level.Info(e.logger).Log("msg", "Got Submission Received event",
@@ -410,21 +408,12 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 			}).Set(float64(round.Submission.Key.Int64()))
 		}
 		for _, update := range event.AnswerUpdated {
-			res, err := json.Marshal(update)
+			err := e.writeToKafka("AnswerUpdated", update)
 			if err != nil {
-				level.Error(e.logger).Log("msg", "Could not parse message", "err", err)
+				level.Error(e.logger).Log("msg", "Could not send message to kafka", "err", err)
 				continue
 			}
-			err = e.kafkaWriter.WriteMessages(context.Background(),
-				kafka.Message{
-					Key:   []byte("AnswerUpdated"),
-					Value: res,
-				},
-			)
-			if err != nil {
-				level.Error(e.logger).Log("msg", "Could not write kafka message", "err", err)
-				continue
-			}
+
 			level.Info(e.logger).Log("msg", "Got Answer Updated event",
 				"feed", update.Feed,
 				"round", update.RoundId,
