@@ -33,6 +33,7 @@ func (fm *FeedManager) Subscribe(msgs chan types.Message, logger log.Logger, add
 	out, err := fm.TendermintClient.Subscribe(context.Background(), "subscribe", query)
 
 	if err != nil {
+		level.Error(logger).Log("msg", "Could not subscribe to", "address", address)
 		return err
 	}
 

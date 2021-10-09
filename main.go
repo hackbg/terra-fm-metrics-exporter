@@ -26,13 +26,13 @@ func NewKafkaWriter(kafkaURL, topic string) *kafka.Writer {
 }
 
 var (
-	ConstLabels      map[string]string
-	RPC_ADDR         = os.Getenv("TERRA_RPC")
-	TENDERMINT_URL   = os.Getenv("TENDERMINT_URL")
-	KAFKA_SERVER     = os.Getenv("KAFKA_SERVER")
-	TOPIC            = os.Getenv("TOPIC")
-	SERVICE_PORT     = os.Getenv("SERVICE_PORT")
-	POLLING_INTERVAL = os.Getenv("POLLING_INTERVAL")
+	ConstLabels                 map[string]string
+	RPC_ADDR                    = os.Getenv("TERRA_RPC")
+	TENDERMINT_URL              = os.Getenv("TENDERMINT_URL")
+	KAFKA_SERVER, KAFKA_ENABLED = os.LookupEnv("KAFKA_SERVER")
+	TOPIC                       = os.Getenv("TOPIC")
+	SERVICE_PORT                = os.Getenv("SERVICE_PORT")
+	POLLING_INTERVAL            = os.Getenv("POLLING_INTERVAL")
 )
 
 // register metrics
@@ -66,8 +66,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize the exporter
-	kafkaWriter := NewKafkaWriter(KAFKA_SERVER, TOPIC)
+	// Check if kafka should be set
+	var kafkaWriter *kafka.Writer
+
+	if KAFKA_ENABLED {
+		kafkaWriter = NewKafkaWriter(KAFKA_SERVER, TOPIC)
+	} else {
+		kafkaWriter = nil
+	}
+
+	// initialize the exporter
 	_, err = exporter.NewExporter(logger, msgs, kafkaWriter, pollingInterval)
 	if err != nil {
 		level.Error(logger).Log("msg", "Could not create the exporter", "err", err)
