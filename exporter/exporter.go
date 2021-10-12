@@ -31,6 +31,7 @@ var (
 
 const (
 	ContractType = "flux_monitor"
+	NetworkName  = "Terra"
 )
 
 func StringToInt(s string) int {
@@ -318,7 +319,7 @@ func (e *Exporter) setContractMetadata(proxyAddr string) {
 		feed.Name,
 		feed.Path,
 		status.NodeInfo.Network,
-		status.NodeInfo.Moniker,
+		NetworkName,
 		feed.Symbol,
 	).Set(1)
 }
@@ -332,7 +333,7 @@ func (e *Exporter) fetchNodeMetrics() {
 
 	e.nodeMetadataGauge.WithLabelValues(
 		status.NodeInfo.Network,
-		status.NodeInfo.Moniker,
+		NetworkName,
 		"placeholder",
 		"placeholder",
 	).Set(1)
