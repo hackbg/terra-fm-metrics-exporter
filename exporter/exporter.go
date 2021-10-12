@@ -184,7 +184,7 @@ func GetConfig(feeds map[string]types.FeedConfig) error {
 	}
 
 	for _, feed := range config {
-		feeds[feed.ContractAddress] = feed
+		feeds[feed.ProxyAddress] = feed
 	}
 
 	return nil
@@ -272,7 +272,7 @@ func (e *Exporter) subscribeFeed(ch chan types.Message, logger log.Logger, manag
 	manager.Feed.Aggregator = *aggregator
 
 	// sub proxy first
-	err = manager.Subscribe(ch, logger, manager.Feed.ContractAddress)
+	err = manager.Subscribe(ch, logger, manager.Feed.ProxyAddress)
 	if err != nil {
 		return err
 	}
@@ -294,7 +294,7 @@ func (e *Exporter) subscribeFeeds(ch chan types.Message, logger log.Logger) {
 			continue
 		}
 		// set initial contract metadata
-		go e.setContractMetadata(manager.Feed.ContractAddress)
+		go e.setContractMetadata(manager.Feed.ProxyAddress)
 	}
 }
 
@@ -483,7 +483,7 @@ func (e *Exporter) poll() {
 		}
 		for _, feed := range newFeeds {
 			e.mutex.Lock()
-			_, present := e.managers[feed.ContractAddress]
+			_, present := e.managers[feed.ProxyAddress]
 			// if the feed is not present in the map of feeds, create new manager and subscribe to events
 			if !present {
 				level.Info(e.logger).Log("msg", "Found new feed", "name", feed.Name)
@@ -493,16 +493,16 @@ func (e *Exporter) poll() {
 					continue
 				}
 				manager := manager.NewManager(feed, tendermintClient, e.logger)
-				e.managers[feed.ContractAddress] = manager
+				e.managers[feed.ProxyAddress] = manager
 
-				err = e.subscribeFeed(e.msgCh, e.logger, e.managers[feed.ContractAddress])
+				err = e.subscribeFeed(e.msgCh, e.logger, e.managers[feed.ProxyAddress])
 				if err != nil {
 					continue
 				}
 			}
 			// if the feed exists, update the config
-			e.managers[feed.ContractAddress].UpdateFeed(e.WasmClient, e.logger, feed)
-			go e.setContractMetadata(feed.ContractAddress)
+			e.managers[feed.ProxyAddress].UpdateFeed(e.WasmClient, e.logger, feed)
+			go e.setContractMetadata(feed.ProxyAddress)
 			e.mutex.Unlock()
 		}
 	}
