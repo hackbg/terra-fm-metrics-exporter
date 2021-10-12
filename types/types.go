@@ -118,7 +118,7 @@ type TxInfo struct {
 }
 
 type FeedConfig struct {
-	ContractAddress string   `json:"contractAddress"`
+	ProxyAddress    string   `json:"proxyAddress"`
 	ContractVersion int      `json:"contractVersion"`
 	DecimalPlaces   int      `json:"decimalPlaces"`
 	Heartbeat       int64    `json:"heartbeat"`
@@ -130,7 +130,7 @@ type FeedConfig struct {
 	Path            string   `json:"path"`
 	NodeCount       int      `json:"nodeCount"`
 	Status          string   `json:"status"`
-	Aggregator      string   `json:"aggregator:omitempty"`
+	Aggregator      string   `json:"contractAddress"`
 }
 
 type LatestRoundInfo struct {
