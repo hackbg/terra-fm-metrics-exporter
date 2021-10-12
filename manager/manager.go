@@ -28,7 +28,7 @@ func NewManager(feed types.FeedConfig, client *tmrpc.HTTP, logger log.Logger) *F
 
 func (fm *FeedManager) Subscribe(msgs chan types.Message, logger log.Logger, address string) (err error) {
 	level.Info(logger).Log("msg", "Subscribing to feed events", "address", address)
-	proxyAddress := fm.Feed.ContractAddress
+	proxyAddress := fm.Feed.ProxyAddress
 	query := fmt.Sprintf("tm.event='Tx' AND execute_contract.contract_address='%s'", address)
 	out, err := fm.TendermintClient.Subscribe(context.Background(), "subscribe", query)
 
@@ -61,7 +61,7 @@ func (fm *FeedManager) GetAggregator(wasmClient wasmTypes.QueryClient) (aggregat
 	res, err := wasmClient.ContractStore(
 		context.Background(),
 		&wasmTypes.QueryContractStoreRequest{
-			ContractAddress: fm.Feed.ContractAddress,
+			ContractAddress: fm.Feed.ProxyAddress,
 			QueryMsg:        []byte(`{"get_aggregator": {}}`),
 		},
 	)

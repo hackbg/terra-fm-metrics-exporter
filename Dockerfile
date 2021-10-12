@@ -8,7 +8,8 @@ RUN sha256sum /lib/libwasmvm_muslc.a | grep ef294a7a53c8d0aa6a8da4b10e94fb9f053f
 
 RUN go build -mod=readonly -tags "muslc" -o bin/terra-chainlink-exporter
 
-FROM scratch
+FROM alpine:3.12
+RUN apk add ca-certificates
 COPY --from=go-builder /bin/terra-chainlink-exporter /bin/terra-chainlink-exporter
 
 EXPOSE 8089
