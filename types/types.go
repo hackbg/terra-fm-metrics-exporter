@@ -133,6 +133,15 @@ type FeedConfig struct {
 	Aggregator      string   `json:"contractAddress"`
 }
 
+type NodeConfig struct {
+	Id            string   `json:"id"`
+	Website       string   `json:"website"`
+	Name          string   `json:"name"`
+	Status        string   `json:"status"`
+	NodeAddress   []string `json:"nodeAddress"`
+	OracleAddress string   `json:"oracleAddress"`
+}
+
 type LatestRoundInfo struct {
 	RoundId     uint32 `json:"round_id"`
 	Submissions uint32 `json:"submissions"`
@@ -152,6 +161,7 @@ type AggregatorConfigResponse struct {
 	MinSubmissionValue string `json:"min_submission_value,omitempty"`
 	MaxSubmissionValue string `json:"max_submission_value,omitempty"`
 }
+
 type LatestRoundResponse struct {
 	RoundId         int    `json:"round_id"`
 	Answer          string `json:"answer"`

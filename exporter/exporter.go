@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
+	"github.com/google/go-cmp/cmp"
 	"github.com/hackbg/terra-chainlink-exporter/collector"
 	"github.com/hackbg/terra-chainlink-exporter/manager"
 	"github.com/hackbg/terra-chainlink-exporter/types"
@@ -23,10 +24,12 @@ import (
 )
 
 var (
-	CONFIG_URL       = os.Getenv("CONFIG_URL")
-	RPC_ADDR         = os.Getenv("TERRA_RPC")
-	TENDERMINT_URL   = os.Getenv("TENDERMINT_URL")
-	POLLING_INTERVAL = os.Getenv("POLLING_INTERVAL")
+	FEED_CONFIG_URL       = os.Getenv("FEED_CONFIG_URL")
+	NODE_CONFIG_URL       = os.Getenv("NODE_CONFIG_URL")
+	RPC_ADDR              = os.Getenv("TERRA_RPC")
+	TENDERMINT_URL        = os.Getenv("TENDERMINT_URL")
+	FEED_POLLING_INTERVAL = os.Getenv("FEED_POLLING_INTERVAL")
+	NODE_POLLING_INTERVAL = os.Getenv("NODE_POLLING_INTERVAL")
 )
 
 const (
@@ -121,6 +124,7 @@ var (
 
 type Exporter struct {
 	managers map[string]*manager.FeedManager
+	nodes    map[string]*types.NodeConfig
 
 	WasmClient       wasmTypes.QueryClient
 	TendermintClient *tmrpc.HTTP
@@ -130,7 +134,8 @@ type Exporter struct {
 	mutex       sync.RWMutex
 	kafkaWriter *kafka.Writer
 
-	pollingInterval time.Duration
+	feedPollingInterval time.Duration
+	nodePollingInterval time.Duration
 
 	answersCounter          *prometheus.CounterVec
 	answersGauge            *prometheus.GaugeVec
@@ -170,9 +175,9 @@ func NewTendermintClient() (*tmrpc.HTTP, error) {
 	return client, nil
 }
 
-func GetConfig(feeds map[string]types.FeedConfig) error {
+func GetFeedConfig(feeds map[string]types.FeedConfig) error {
 	var config []types.FeedConfig
-	response, err := http.Get(CONFIG_URL)
+	response, err := http.Get(FEED_CONFIG_URL)
 	if err != nil {
 		return err
 	}
@@ -191,7 +196,35 @@ func GetConfig(feeds map[string]types.FeedConfig) error {
 	return nil
 }
 
-func NewExporter(l log.Logger, ch chan types.Message, kafka *kafka.Writer, pollingInterval time.Duration) (*Exporter, error) {
+func GetNodeConfig(nodes map[string]types.NodeConfig) error {
+	var config []types.NodeConfig
+	response, err := http.Get(NODE_CONFIG_URL)
+
+	if err != nil {
+		return err
+	}
+
+	err = json.NewDecoder(response.Body).Decode(&config)
+	defer response.Body.Close()
+
+	if err != nil {
+		return err
+	}
+
+	for _, node := range config {
+		nodes[node.NodeAddress[0]] = node
+	}
+
+	return nil
+}
+
+func NewExporter(
+	l log.Logger,
+	ch chan types.Message,
+	kafka *kafka.Writer,
+	feedPollingInterval time.Duration,
+	nodePollingInterval time.Duration,
+) (*Exporter, error) {
 	// create wasm client
 	wasmClient, err := NewWasmClient()
 	if err != nil {
@@ -211,7 +244,14 @@ func NewExporter(l log.Logger, ch chan types.Message, kafka *kafka.Writer, polli
 
 	// fetch feed configurations
 	feeds := make(map[string]types.FeedConfig)
-	err = GetConfig(feeds)
+	err = GetFeedConfig(feeds)
+	if err != nil {
+		return nil, err
+	}
+
+	// fetch node configurations
+	nodes := make(map[string]types.NodeConfig)
+	err = GetNodeConfig(nodes)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +277,8 @@ func NewExporter(l log.Logger, ch chan types.Message, kafka *kafka.Writer, polli
 		mutex:            sync.RWMutex{},
 		kafkaWriter:      kafka,
 
-		pollingInterval: pollingInterval,
+		feedPollingInterval: feedPollingInterval,
+		nodePollingInterval: nodePollingInterval,
 
 		answersCounter: FmAnswersTotal,
 		answersGauge:   FmAnswersGauge,
@@ -324,7 +365,7 @@ func (e *Exporter) setContractMetadata(proxyAddr string) {
 	).Set(1)
 }
 
-func (e *Exporter) fetchNodeMetrics() {
+func (e *Exporter) fetchNodeMetrics(feedAddr string) {
 	status, err := e.TendermintClient.Status(context.TODO())
 	if err != nil {
 		level.Error(e.logger).Log("msg", "Can't get the node status", "err", err)
@@ -334,13 +375,13 @@ func (e *Exporter) fetchNodeMetrics() {
 	e.nodeMetadataGauge.WithLabelValues(
 		status.NodeInfo.Network,
 		NetworkName,
-		"placeholder",
-		"placeholder",
+		e.nodes[feedAddr].OracleAddress,
+		e.nodes[feedAddr].NodeAddress[0],
 	).Set(1)
 
 	e.currentHeadGauge.WithLabelValues(
 		status.NodeInfo.Network,
-		status.NodeInfo.Moniker,
+		NetworkName,
 	).Set(float64(status.SyncInfo.LatestBlockHeight))
 }
 
@@ -455,7 +496,7 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 				return
 			}
 
-			go e.fetchNodeMetrics()
+			go e.fetchNodeMetrics(resp.Address)
 
 			info := collector.ExtractTxInfo(resp.Event.Data.(tmTypes.EventDataTx))
 			eventRecords, err := collector.ParseEvents(
@@ -473,11 +514,11 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 	}()
 }
 
-func (e *Exporter) poll() {
+func (e *Exporter) pollFeeds() {
 	newFeeds := make(map[string]types.FeedConfig)
-	ticker := time.NewTicker(e.pollingInterval)
+	ticker := time.NewTicker(e.feedPollingInterval)
 	for range ticker.C {
-		err := GetConfig(newFeeds)
+		err := GetFeedConfig(newFeeds)
 		if err != nil {
 			level.Error(e.logger).Log("msg", "Could not fetch new feed configurations", "err", err)
 			continue
@@ -509,6 +550,36 @@ func (e *Exporter) poll() {
 	}
 }
 
+func (e *Exporter) pollNodes() {
+	newNodes := make(map[string]types.NodeConfig)
+	ticker := time.NewTicker(e.nodePollingInterval)
+	for range ticker.C {
+		err := GetNodeConfig(newNodes)
+		if err != nil {
+			level.Error(e.logger).Log("msg", "Could not fetch new node configurations", "err", err)
+			continue
+		}
+
+		for _, node := range newNodes {
+			e.mutex.Lock()
+			_, present := e.nodes[node.NodeAddress[0]]
+			if !present {
+				level.Info(e.logger).Log("msg", "Found new node", "name", node.Name)
+				e.nodes[node.NodeAddress[0]] = &node
+				continue
+			}
+			res := cmp.Equal(e.nodes[node.NodeAddress[0]], node)
+
+			if !res {
+				e.nodes[node.NodeAddress[0]] = &node
+			}
+
+			e.mutex.Unlock()
+		}
+	}
+}
+
 func (e *Exporter) pollChanges() {
-	go e.poll()
+	go e.pollFeeds()
+	go e.pollNodes()
 }
