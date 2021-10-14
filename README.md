@@ -21,7 +21,7 @@
   - [x] feed_contract_metadata
   - [x] flux_monitor_answers
   - [x] head_tracker_current_head
-  - [ ] flux_monitor_latest_round_responses
+  - [x] flux_monitor_latest_round_responses
   - [ ] flux_monitor_round_age
 - [ ] Events
   - [x] NewRound

@@ -104,7 +104,6 @@ var (
 		},
 		[]string{"network_name", "chain_id"},
 	)
-	// TODO:
 	FmLatestRoundResponsesGauge = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "flux_monitor_latest_round_responses",
@@ -137,16 +136,16 @@ type Exporter struct {
 	feedPollingInterval time.Duration
 	nodePollingInterval time.Duration
 
-	answersCounter          *prometheus.CounterVec
-	answersGauge            *prometheus.GaugeVec
-	submissionsCounter      *prometheus.CounterVec
-	submissionsGauge        *prometheus.GaugeVec
-	roundsCounter           *prometheus.CounterVec
-	nodeMetadataGauge       *prometheus.GaugeVec
-	contractMetadataGauge   *prometheus.GaugeVec
-	currentHeadGauge        *prometheus.GaugeVec
-	latetRoundResponseGauge *prometheus.GaugeVec
-	roundAgeGauge           *prometheus.GaugeVec
+	answersCounter           *prometheus.CounterVec
+	answersGauge             *prometheus.GaugeVec
+	submissionsCounter       *prometheus.CounterVec
+	submissionsGauge         *prometheus.GaugeVec
+	roundsCounter            *prometheus.CounterVec
+	nodeMetadataGauge        *prometheus.GaugeVec
+	contractMetadataGauge    *prometheus.GaugeVec
+	currentHeadGauge         *prometheus.GaugeVec
+	latestRoundResponseGauge *prometheus.GaugeVec
+	roundAgeGauge            *prometheus.GaugeVec
 }
 
 func NewWasmClient() (wasmClient wasmTypes.QueryClient, err error) {
@@ -196,7 +195,7 @@ func GetFeedConfig(feeds map[string]types.FeedConfig) error {
 	return nil
 }
 
-func GetNodeConfig(nodes map[string]types.NodeConfig) error {
+func GetNodeConfig(nodes map[string]*types.NodeConfig) error {
 	var config []types.NodeConfig
 	response, err := http.Get(NODE_CONFIG_URL)
 
@@ -212,7 +211,7 @@ func GetNodeConfig(nodes map[string]types.NodeConfig) error {
 	}
 
 	for _, node := range config {
-		nodes[node.NodeAddress[0]] = node
+		nodes[node.NodeAddress[0]] = &node
 	}
 
 	return nil
@@ -250,7 +249,7 @@ func NewExporter(
 	}
 
 	// fetch node configurations
-	nodes := make(map[string]types.NodeConfig)
+	nodes := make(map[string]*types.NodeConfig)
 	err = GetNodeConfig(nodes)
 	if err != nil {
 		return nil, err
@@ -270,6 +269,7 @@ func NewExporter(
 
 	e := Exporter{
 		managers:         managers,
+		nodes:            nodes,
 		WasmClient:       wasmClient,
 		TendermintClient: tendermintClient,
 		logger:           l,
@@ -291,9 +291,9 @@ func NewExporter(
 		nodeMetadataGauge:     NodeMetadataGauge,
 		contractMetadataGauge: FeedContractMetadataGauge,
 
-		currentHeadGauge:        FmCurrentHeadGauge,
-		latetRoundResponseGauge: FmLatestRoundResponsesGauge,
-		roundAgeGauge:           FmRoundAge,
+		currentHeadGauge:         FmCurrentHeadGauge,
+		latestRoundResponseGauge: FmLatestRoundResponsesGauge,
+		roundAgeGauge:            FmRoundAge,
 	}
 
 	// subscribe to feeds events
@@ -365,19 +365,22 @@ func (e *Exporter) setContractMetadata(proxyAddr string) {
 	).Set(1)
 }
 
-func (e *Exporter) fetchNodeMetrics(feedAddr string) {
+func (e *Exporter) fetchNodeMetrics() {
 	status, err := e.TendermintClient.Status(context.TODO())
+
 	if err != nil {
 		level.Error(e.logger).Log("msg", "Can't get the node status", "err", err)
 		return
 	}
 
-	e.nodeMetadataGauge.WithLabelValues(
-		status.NodeInfo.Network,
-		NetworkName,
-		e.nodes[feedAddr].OracleAddress,
-		e.nodes[feedAddr].NodeAddress[0],
-	).Set(1)
+	for address, node := range e.nodes {
+		e.nodeMetadataGauge.WithLabelValues(
+			status.NodeInfo.Network,
+			NetworkName,
+			node.OracleAddress,
+			address,
+		).Set(1)
+	}
 
 	e.currentHeadGauge.WithLabelValues(
 		status.NodeInfo.Network,
@@ -421,6 +424,10 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 			e.roundsCounter.With(prometheus.Labels{
 				"contract_address": round.Feed,
 			}).Inc()
+
+			e.latestRoundResponseGauge.With(prometheus.Labels{
+				"contract_address": round.Feed,
+			}).Set(float64(0))
 		}
 		for _, round := range event.SubmissionReceived {
 			err := e.writeToKafka("SubmissionReceived", round)
@@ -442,6 +449,11 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 				"contract_address": round.Feed,
 				"sender":           string(round.Sender),
 			}).Set(float64(round.Submission.Key.Int64()))
+
+			e.latestRoundResponseGauge.With(prometheus.Labels{
+				"contract_address": round.Feed,
+			}).Inc()
+
 		}
 		for _, update := range event.AnswerUpdated {
 			err := e.writeToKafka("AnswerUpdated", update)
@@ -496,7 +508,7 @@ func (e *Exporter) storeEvents(out chan types.Message) {
 				return
 			}
 
-			go e.fetchNodeMetrics(resp.Address)
+			go e.fetchNodeMetrics()
 
 			info := collector.ExtractTxInfo(resp.Event.Data.(tmTypes.EventDataTx))
 			eventRecords, err := collector.ParseEvents(
@@ -551,7 +563,7 @@ func (e *Exporter) pollFeeds() {
 }
 
 func (e *Exporter) pollNodes() {
-	newNodes := make(map[string]types.NodeConfig)
+	newNodes := make(map[string]*types.NodeConfig)
 	ticker := time.NewTicker(e.nodePollingInterval)
 	for range ticker.C {
 		err := GetNodeConfig(newNodes)
@@ -565,13 +577,13 @@ func (e *Exporter) pollNodes() {
 			_, present := e.nodes[node.NodeAddress[0]]
 			if !present {
 				level.Info(e.logger).Log("msg", "Found new node", "name", node.Name)
-				e.nodes[node.NodeAddress[0]] = &node
+				e.nodes[node.NodeAddress[0]] = node
 				continue
 			}
 			res := cmp.Equal(e.nodes[node.NodeAddress[0]], node)
 
 			if !res {
-				e.nodes[node.NodeAddress[0]] = &node
+				e.nodes[node.NodeAddress[0]] = node
 			}
 
 			e.mutex.Unlock()
