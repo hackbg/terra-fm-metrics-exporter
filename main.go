@@ -32,7 +32,8 @@ var (
 	KAFKA_SERVER, KAFKA_ENABLED = os.LookupEnv("KAFKA_SERVER")
 	TOPIC                       = os.Getenv("TOPIC")
 	SERVICE_PORT                = os.Getenv("SERVICE_PORT")
-	POLLING_INTERVAL            = os.Getenv("POLLING_INTERVAL")
+	FEED_POLLING_INTERVAL       = os.Getenv("FEED_POLLING_INTERVAL")
+	NODE_POLLING_INTERVAL       = os.Getenv("NODE_POLLING_INTERVAL")
 )
 
 // register metrics
@@ -56,10 +57,20 @@ func main() {
 
 	msgs := make(chan types.Message)
 
-	if POLLING_INTERVAL == "" {
-		POLLING_INTERVAL = "5s"
+	if FEED_POLLING_INTERVAL == "" {
+		FEED_POLLING_INTERVAL = "5s"
 	}
-	pollingInterval, err := time.ParseDuration(POLLING_INTERVAL)
+	feedPollingInterval, err := time.ParseDuration(FEED_POLLING_INTERVAL)
+
+	if err != nil {
+		level.Error(logger).Log("msg", "Could not set the polling interval", "err", err)
+		os.Exit(1)
+	}
+
+	if NODE_POLLING_INTERVAL == "" {
+		NODE_POLLING_INTERVAL = "10m"
+	}
+	nodePollingInterval, err := time.ParseDuration(FEED_POLLING_INTERVAL)
 
 	if err != nil {
 		level.Error(logger).Log("msg", "Could not set the polling interval", "err", err)
@@ -76,7 +87,7 @@ func main() {
 	}
 
 	// initialize the exporter
-	_, err = exporter.NewExporter(logger, msgs, kafkaWriter, pollingInterval)
+	_, err = exporter.NewExporter(logger, msgs, kafkaWriter, feedPollingInterval, nodePollingInterval)
 	if err != nil {
 		level.Error(logger).Log("msg", "Could not create the exporter", "err", err)
 		return
